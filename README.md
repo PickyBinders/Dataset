@@ -51,30 +51,37 @@ The following scores are defined:
 - PLI similarity
 ![PLI similarity](./figures/pli_similarity.png)
 
-For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping is performed using the protein_lddt_qcov for protein chain mapping and the pocket_qcov for ligand chain mapping. The mapping is performed by sorting the chains by the score and then assigning the highest scoring chain pair to each other, and then removing the chains from the list and repeating until all chains are assigned. The mapping is performed separately for protein and ligand chains. Scores are combined by taking a length-weighted average of the scores for each chain pair, with protein length for protein scores and number of pocket residues used for pocket scores.
+For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping is performed using the protein_lddt_qcov for protein chain mapping and the pocket_qcov for ligand chain mapping. Scores are combined by taking a length-weighted average of the scores for each chain pair, with protein chain length used for protein scores and number of pocket residues used for pocket scores.
 
 ### Clustering
 
-For each individual score, a directed graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.25, 0.5, 0.7, 0.99] for each score.
-Strongly connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
+For each individual score, a directed graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.25, 0.5, 0.7, 0.99] for each score. Strongly connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
 
 ### Columns in the dataframe
 
 See `test.tsv` for an example.
 ```
-# Pocket related columns:
+# Pocket merging:
+pocket_ID
+single_pocket_ID			
+Pocket_Number	
+Pocket_Name	
+num_ligands_in_pocket		
 ligand_mmcif_chain	
 Ligand	
 PDB_chain	
 PDB_ID				
 biounit
-joint_pocket_ID		
+joint_pocket_ID	
+
+# Pocket related:
 prox_chains	
-num_prox_chains	prox_residues	
+num_prox_chains	
+prox_residues	
 center_of_mass
 has_bs
 
-# Validation related columns:
+# Validation related:
 validation_pocket_ID	
 rscc	
 rsr	
@@ -96,7 +103,7 @@ iridium_pass
 pass
 has_validation
 
-# PLIP related columns:
+# PLIP related:
 plip_pocket_ID	
 ligtype
 hash
@@ -109,32 +116,25 @@ num_plip_interactions
 num_unique_plip_interactions
 has_plip		
 
-# Ligand related
+# Ligand related:
 ligand_type	
 is_biolip_artifact	
 is_artifact	
 is_ion
 
-# SMTL related
+# PDB entry related:
 method	
 oligo_state	
 transmembrane	
 resolution	
-protein_chain_lengths	
 date	
 year
+protein_chain_lengths
 
-# UniProt related
+# UniProt related:
 UniProt_IDs	
 num_uniprot_ids	
 num_pdbs_for_uniprots	
-
-# Pocket merging
-single_pocket_ID			
-Pocket_Number	
-Pocket_Name	
-num_ligands_in_pocket		
-pocket_ID	
 
 # Component identifiers
 protein_qcov__0.25__component	protein_qcov__0.5__component	protein_qcov__0.7__component	protein_qcov__0.99__component	
