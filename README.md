@@ -5,14 +5,14 @@
 ### Sources of pockets
 ![Sources of pockets](./figures/dataset_1.png)
 
-1. PDB - See `extract_pockets` in `annotate/pockets.py`. For all non-polymer chains in the PDB, all polymer chain residues within 8A of the non-polymer chain, and the center of mass of the non-polymer chain are extracted.
-2. Validation criteria - See `annotate/validation.py`. Information is extracted for each pocket from the PDB validation report. This only applies to pockets from X-ray structures with EDS data (doesn't handle oligosaccharides and oligonucleotides).
-3. PLIP - See `annotate/plip.py`. Annotations detected by PLIP are extracted for each pocket in each biounit from SMTL.
+1. PDB - See `pockets.py`. For all non-polymer chains in the PDB, all polymer chain residues within 8A of the non-polymer chain, and the center of mass of the non-polymer chain are extracted.
+2. Validation criteria - See `validation.py`. Information is extracted for each pocket from the PDB validation report. This only applies to pockets from X-ray structures with EDS data (doesn't handle oligosaccharides and oligonucleotides).
+3. PLIP - See `plip.py`. Annotations detected by PLIP are extracted for each pocket in each biounit from SMTL.
 
 ### Annotating pockets
 - All pockets and associated info from the 3 sources are merged into a single dataframe, using the PDB_ID and ligand_mmcif_chain as the key 
 - Referred to as single ligand pockets (SPLC) - consists of (PDB_ID, biounit, ligand_mmcif_chain, prox_plip_chains)
-- Ligands are labeled as (see `label_ligand_types` in `annotate/create_dataset.py`):
+- Ligands are labeled as (see `label_ligand_types` in `create_dataset.py`):
     - cofactor
     - drug-like
     - fragment
@@ -35,9 +35,9 @@
 
 ### Pocket similarity
 
-A Foldseek search is run on all PDB chains (parameters in `cluster/run_foldseek.sh`), and the alignments and per-residue lDDT scores are saved.
+A Foldseek search is run on all PDB chains (parameters in `run_foldseek.sh`), and the alignments and per-residue lDDT scores are saved.
 
-The following scores are defined:
+The following scores are defined (see `clustering.py`):
 - Protein similarity
     - protein_lddt: lDDT score
     - protein_lddt_qcov: lDDT x query coverage
@@ -55,7 +55,7 @@ For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping i
 
 ### Clustering
 
-For each individual score, a directed graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.25, 0.5, 0.7, 0.99] for each score. Strongly connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
+For each individual score, a directed graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.25, 0.5, 0.7, 0.99] for each score (see `label_protein_pocket_clusters` in `clustering.py`). Strongly connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
 
 ### Columns in the dataframe
 
