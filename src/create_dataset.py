@@ -1,16 +1,12 @@
 from multiprocessing import Pool
-import pandas as pnd
 from tqdm import tqdm
 from pathlib import Path
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pnd
 from collections import defaultdict
-from matplotlib.colors import hex2color
 import json
 from rdkit import Chem
 from rdkit import RDLogger
-RDLogger.DisableLog('rdApp.*') 
 from pdbeccdutils.core import ccd_reader
 
 VALIDATION_COLUMNS = [
@@ -64,14 +60,13 @@ def read_df(df_file, columns=None):
     for column in ["prox_plip_ligand_chains", "prox_plip_chains", "prox_plip_residues", "prox_chains", "prox_residues"]:
         if column in df.columns:
             df[column] = df[column].apply(lambda x: parse_list_set(x, use_set=True))
-    for column in ["center_of_mass", "protein_chain_lengths", "pdb_id_protein_chains", "UniProt_IDs", "num_uniprot_ids", "num_pdbs_for_uniprots"]:
+    for column in ["center_of_mass", "protein_chain_lengths", "UniProt_IDs", "num_uniprot_ids", "num_pdbs_for_uniprots"]:
         if column in df.columns:
             df[column] = df[column].apply(lambda x: parse_list_set(x))
     return df
 
 
 def parse_cofactors(cofactor_file):
-    """Cofactors from PDBe and https://doi.org/10.1021/acs.jcim.3c01573"""
     with open(cofactor_file) as f:
         cofactors_json = json.load(f)
     extra = {
@@ -191,59 +186,50 @@ def assign_pocket(df):
         pocket_number = 0
         pocket_dict = {}
         for index, row in group.iterrows():
+            prox_ligand_chains = row['prox_plip_ligand_chains']
+            if prox_ligand_chains is None:
+                prox_ligand_chains = set()
+            prox_ligand_chains = set(prox_ligand_chains)
             assigned = False
             for key, value in pocket_dict.items():
-                if row['ligand_mmcif_chain'] in value or len(set(row['prox_plip_ligand_chains']).intersection(value)) > 0:
+                if row['ligand_mmcif_chain'] in value or len(prox_ligand_chains.intersection(value)) > 0:
                     df.loc[index, 'Pocket_Number'] = key
-                    pocket_dict[key] |= row['prox_plip_ligand_chains']
+                    pocket_dict[key] |= prox_ligand_chains
                     assigned = True
                     break
             if not assigned:
                 pocket_name = f"{pdb_id}_{int(biounit)}_{pocket_number}"
-                ligand_chains = row['prox_plip_ligand_chains']
+                ligand_chains = prox_ligand_chains.copy()
                 ligand_chains.add(row['ligand_mmcif_chain'])
                 pocket_dict[pocket_name] = ligand_chains
                 df.loc[index, 'Pocket_Number'] = pocket_name
                 pocket_number += 1
     df = df[df["Pocket_Number"].notnull()].reset_index(drop=True)
-    number_to_name = df.groupby("Pocket_Number").apply(lambda x: "_".join(sorted(set(x["ligand_mmcif_chain"])))).to_dict()
-    df["Pocket_Name"] = df["Pocket_Number"].apply(lambda x: f"{x.split('_')[0]}__{x.split('_')[1]}__{number_to_name[x]}" if str(x) != "nan" else np.nan)
-    df["num_ligands_in_pocket"] = df["Pocket_Name"].apply(lambda x: len(x.split("__")[-1].split("_")) if str(x) != "nan" else 0)
+    pocket_to_id = {}
+    pocket_to_nums = {}
+    for _, pocket in tqdm(df.groupby("Pocket_Number")):
+        ligand_chain_to_name = {}
+        for _, row in pocket.iterrows():
+            ligand_chain_to_name[row["ligand_mmcif_chain"]] = row["Ligand"]
+        ligand_chains = sorted(ligand_chain_to_name)
+        ligand_names = [ligand_chain_to_name[x] for x in sorted(ligand_chain_to_name)]
+        protein_chains = sorted(set(y for x in pocket["prox_plip_chains"] for y in x if str(y) != "nan"))
+        pocket_to_id[pocket["Pocket_Number"].values[0]] = f"{pocket['PDB_ID'].values[0]}_{int(pocket['biounit'].values[0])}__{'_'.join(protein_chains)}__{'_'.join(ligand_chains)}__{'_'.join(ligand_names)}"
+        pocket_to_nums[pocket["Pocket_Number"].values[0]] = (len(ligand_chains), len(protein_chains))
+    df["pocket_ID"] = df["Pocket_Number"].apply(lambda x: pocket_to_id[x])
+    df["num_ligands_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][0])
+    df["num_chains_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][1])
     return df
     
-
-def label_smtl_info(pdb_id, biounit, smtl_dir):
-    pdb_id = pdb_id.lower()
-    annotation_file = smtl_dir / pdb_id[:2] / pdb_id[2:] / f"annotation.{biounit}.json"
-    if not annotation_file.exists():
-        return {}
-    with open(annotation_file) as f:
-        annotation = json.load(f)
-    lengths = {}
-    for x in annotation['entities']:
-        if "seqres" in x:
-            for c in x['chains']:
-                if c['orig_pdb_name'] is not None:
-                    key = f"{pdb_id}_{c['orig_cif_name']}"
-                    lengths[key] = len(x["seqres"])
-    annotation = {"lengths": lengths, "method": annotation["method"], 
-                    "resolution": annotation["resolution"],
-                  "oligo_state": annotation["oligo_state"], 
-                  "transmembrane": annotation.get("membrane", {}).get("is_transmem", None)}
-    return annotation
-
 def label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file):
     pdb_uniprot = pnd.read_csv(pdb_chain_uniprot_mapping_file, sep="\t", comment="#")
-    pdb_uniprot["pdb_id_protein_chain"] = pdb_uniprot["PDB"] + "_" + pdb_uniprot["CHAIN"]
-    pdb_chain_to_uniprots = defaultdict(set)
-    for _, row in tqdm(pdb_uniprot.iterrows()):
-        pdb_chain_to_uniprots[row["pdb_id_protein_chain"]].add(row["SP_PRIMARY"])
-    df["UniProt_IDs"] = df["pdb_id_protein_chains"].apply(lambda x: [";".join(pdb_chain_to_uniprots.get(y, set())) for y in x])
-    df["num_uniprot_ids"] = df["UniProt_IDs"].apply(lambda x: [len(y.split(";")) for y in x])
+    pdb_chain_to_uniprots = pdb_uniprot.groupby(["PDB", "CHAIN"])["SP_PRIMARY"].apply(set).to_dict()
+    df["UniProt_IDs"] = df.apply(lambda row: [";".join(pdb_chain_to_uniprots.get((row["PDB_ID"], y), set())) for y in sorted(row["prox_plip_chains"])] if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+    df["num_uniprot_ids"] = df["UniProt_IDs"].apply(lambda x: [len(y.split(";")) for y in x] if str(x) != "nan" else np.nan)
     uniprot_df = pnd.read_csv(uniprot_pdb_mapping_file, comment="#", sep="\t")
     uniprot_df["num_pdbs"] = uniprot_df["PDB"].apply(lambda x: len(x.split(";")))
-    id_to_num_pdbs = dict(zip(uniprot_df["SP_PRIMARY"], uniprot_df["num_pdbs"]))
-    df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [sum(id_to_num_pdbs.get(z, 0) for z in y.split(";")) for y in x] if str(x) != "nan" else 0)
+    uniprot_id_to_num_pdbs = dict(zip(uniprot_df["SP_PRIMARY"], uniprot_df["num_pdbs"]))
+    df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [sum(uniprot_id_to_num_pdbs.get(z, 0) for z in y.split(";")) for y in x] if str(x) != "nan" else np.nan)
     return df
 
 def label_dates(df, date_dir):
@@ -255,19 +241,33 @@ def label_dates(df, date_dir):
     df["year"] = df["date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
     return df
 
-def annotate_df(df, smtl_dir, date_dir, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file, num_threads=20):
-    df["pdb_id_protein_chains"] = df.apply(lambda x: [f"{x['PDB_ID'].lower()}_{y}" for y in sorted(x['prox_plip_chains'])] if str(x['prox_plip_chains']) != "nan" else [], axis=1)
+def get_smtl_info(pdb_id, biounit, smtl_dir):
+    smtl_dir = Path(smtl_dir)
+    pdb_id = pdb_id.lower()
+    annotation_file = smtl_dir / pdb_id[:2] / pdb_id[2:] / f"annotation.{biounit}.json"
+    if not annotation_file.exists():
+        return dict(pdb_id=pdb_id.upper(), biounit=biounit)
+    with open(annotation_file) as f:
+        annotation = json.load(f)
+    lengths = {}
+    for x in annotation['entities']:
+        if "seqres" in x:
+            for c in x['chains']:
+                if c['orig_pdb_name'] is not None:
+                    lengths[c['orig_cif_name']] = len(x["seqres"])
+    return dict(pdb_id=pdb_id.upper(), biounit=biounit, lengths=lengths, method=annotation["method"],
+                resolution=annotation["resolution"],oligo_state=annotation["oligo_state"],transmembrane=annotation.get("membrane", {}).get("is_transmem", None))
+
+
+def label_smtl(df, smtl_dir, num_threads=20):
     annotations = {}
-    input_args = [(row["PDB_ID"], row["biounit"], smtl_dir) for _, row in df[["PDB_ID", "biounit"]].drop_duplicates().iterrows()]
+    input_args = [(row["PDB_ID"], int(row["biounit"]), smtl_dir) for _, row in df[["PDB_ID", "biounit"]].drop_duplicates().iterrows()]
     with Pool(num_threads) as p:
-        for (pdb_id, biounit, _), annotation in zip(p.starmap(label_smtl_info, input_args), input_args):
-            annotations[(pdb_id, biounit)] = annotation
+        for annotation in p.starmap(get_smtl_info, input_args):
+            annotations[(annotation["pdb_id"], annotation["biounit"])] = annotation
     for a in ["method", "oligo_state", "transmembrane", "resolution"]:
-        df[a] = df.apply(lambda row: annotations[(row["PDB_ID"], row["biounit"])].get(a, np.nan), axis=1)
-    df["protein_chain_lengths"] = df["pdb_id_protein_chains"].apply(lambda x: [annotations[(y.split("_")[0].upper(), 1)]["lengths"].get(y, np.nan) for y in x])
-    df = label_dates(df, date_dir)
-    df = label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file)
-    df["single_pocket_ID"] = df.apply(lambda row: f'{row["PDB_ID"]}_{int(row["biounit"])}__{"_".join(sorted(row["prox_plip_chains"]))}__{row["ligand_mmcif_chain"]}__{row["Ligand"]}' if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+        df[a] = df.apply(lambda row: annotations.get((row["PDB_ID"], int(row["biounit"])), {}).get(a, np.nan), axis=1)
+    df["protein_chain_lengths"] = df.apply(lambda row: [annotations[(row["PDB_ID"], int(row["biounit"]))]["lengths"].get(y, np.nan) for y in row["prox_plip_chains"]] if (row["PDB_ID"], int(row["biounit"])) in annotations and str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
     return df
 
 def create_dataset_files(dataset_dir, plip_file, validation_file, pocket_dir, components_file, cofactor_file, artifact_file, 
@@ -299,21 +299,24 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, pocket_dir, co
         df = pnd.merge(df, plip_df, 
                     on=['joint_pocket_ID', "PDB_ID", "Ligand", "ligand_mmcif_chain"], 
                     how='outer')
+        df["biounit"] = df["biounit"].fillna(1)
         df = annotate_chains_and_residues(df, pocket_dir)
         RDLogger.DisableLog('rdApp.*')
         parsed_components = ccd_reader.read_pdb_components_file(str(components_file))
         df = label_ligand_types(df, parsed_components, cofactor_file)
         df = label_artifacts(df, artifact_file)
-        df = annotate_df(df, smtl_dir, date_dir, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file, num_threads=num_threads)
+        df = label_smtl(df, smtl_dir, num_threads=num_threads)
+        df = label_dates(df, date_dir)
+        df = label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file)
+        df["single_pocket_ID"] = df.apply(lambda row: f'{row["PDB_ID"]}_{int(row["biounit"])}__{"_".join(sorted(row["prox_plip_chains"]))}__{row["ligand_mmcif_chain"]}__{row["Ligand"]}' if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
         df["has_plip"] = df["plip_pocket_ID"].notna()
         df["has_validation"] = df["validation_pocket_ID"].notna()
         df.to_csv(all_pockets_file, index=False)
     df = read_df(all_pockets_file)
     print("Number of pockets after merging PLIP and validation:", len(df), df["joint_pocket_ID"].nunique())
+    df = df[df["has_plip"] & df["has_bs"]].reset_index(drop=True)
     df = assign_pocket(df)
-    print("Number of pockets after assigning pockets:", len(df), df["joint_pocket_ID"].nunique(), df["Pocket_Number"].nunique())
-    df = df[df["has_plip"] & df["has_bs"]]
-    print("Number of pockets after filtering for PLIP and binding sites")
+    print("Number of pockets after filtering for PLIP and binding sites and merging pockets")
     print("\tTotal rows:", len(df))
     print("\tTotal pockets:", df["joint_pocket_ID"].nunique())
     print("\tTotal merged pockets:", df["Pocket_Number"].nunique())
@@ -344,6 +347,7 @@ def main():
     parser.add_argument("pdb_chain_uniprot_mapping_file", type=str, help="File with PDB to UniProt mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/pdb_chain_uniprot.tsv.gz)")
     parser.add_argument("uniprot_pdb_mapping_file", type=str, help="File with UniProt to PDB mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/uniprot_pdb.tsv.gz)")
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
+    parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
     args = parser.parse_args()
     create_dataset_files(**vars(args))
