@@ -1,4 +1,5 @@
 from multiprocessing import Pool
+import pandas as pnd
 from tqdm import tqdm
 from pathlib import Path
 import numpy as np
@@ -34,7 +35,6 @@ VALIDATION_COLUMNS = [
  'pass',
  'PocketID',
  ]
-
 
 def read_df(df_file, columns=None):
     def parse_list_set(x, use_set=False):
@@ -162,20 +162,31 @@ def label_ligand_types(df, parsed_components, cofactor_file):
     return df
 
 
-def annotate_chains_and_residues(df, pocket_dir):
-    pocket_residues = dict()
-    for bs_file in tqdm(Path(pocket_dir).iterdir()):
-        with open(bs_file) as f:
-            pocket_residues.update(json.load(f))
+def load_cif_data(cif_data_dir):
+    cif_data = {
+        "dates": dict(),
+        "pockets": dict()
+    }
+    for cif_data_file in tqdm(Path(cif_data_dir).iterdir()):
+        with open(cif_data_file) as f:
+            d = json.load(f)
+            cif_data["dates"].update(d["dates"])
+            cif_data["pockets"].update(d["pockets"])
+    return cif_data
+
+def annotate_chains_and_residues(df, cif_data_dir):
+    cif_data = load_cif_data(cif_data_dir)
     df["num_prox_plip_chains"] = df["prox_plip_chains"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
     df["num_prox_plip_residues"] = df["prox_plip_residues"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
-    df["prox_chains"] = df["joint_pocket_ID"].apply(lambda x: set(y["chain"] for y in pocket_residues[x]["binding_site"]) if x in pocket_residues else set())
+    df["prox_chains"] = df["single_pocket_ID"].apply(lambda x: set(y["chain"] for y in cif_data["pockets"][x]["pocket_residues"]) if x in cif_data["pockets"] else set())
     df["num_prox_chains"] = df["prox_chains"].apply(lambda x: len(x))
-    df["prox_residues"] = df["joint_pocket_ID"].apply(lambda x: set(f'{y["chain"]}:{y["residue_number"]}' for y in pocket_residues[x]["binding_site"]) if x in pocket_residues else set())
-    df["center_of_mass"] = df["joint_pocket_ID"].apply(lambda x: pocket_residues[x]["center_of_mass"] if x in pocket_residues else None)
+    df["prox_residues"] = df["single_pocket_ID"].apply(lambda x: set(f'{y["chain"]}:{y["residue_number"]}' for y in cif_data["pockets"][x]["pocket_residues"]) if x in cif_data["pockets"] else set())
+    df["center_of_mass"] = df["single_pocket_ID"].apply(lambda x: cif_data["pockets"][x]["center_of_mass"] if x in cif_data["pockets"] else None)
     df["num_plip_interactions"] = df["hash"].apply(lambda x: len(str(x).split(";")) if x is not None and str(x) != "nan" else 0)
     df["num_unique_plip_interactions"] = df["hash"].apply(lambda x: len(set(str(x).split(";"))) if x is not None and str(x) != "nan" else 0)
-    df["has_bs"] = df["joint_pocket_ID"].apply(lambda x: x in pocket_residues)
+    df["has_pocket"] = df["single_pocket_ID"].apply(lambda x: x in cif_data["pockets"])
+    df["date"] = df["PDB_ID"].apply(lambda x: cif_data["dates"].get(x.upper(), np.nan))
+    df["year"] = df["date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
     return df
 
 
@@ -214,7 +225,7 @@ def assign_pocket(df):
         ligand_chains = sorted(ligand_chain_to_name)
         ligand_names = [ligand_chain_to_name[x] for x in sorted(ligand_chain_to_name)]
         protein_chains = sorted(set(y for x in pocket["prox_plip_chains"] for y in x if str(y) != "nan"))
-        pocket_to_id[pocket["Pocket_Number"].values[0]] = f"{pocket['PDB_ID'].values[0]}_{int(pocket['biounit'].values[0])}__{'_'.join(protein_chains)}__{'_'.join(ligand_chains)}__{'_'.join(ligand_names)}"
+        pocket_to_id[pocket["Pocket_Number"].values[0]] = f"{pocket['PDB_ID'].values[0]}__{int(pocket['biounit'].values[0])}__{'_'.join(protein_chains)}__{'_'.join(ligand_chains)}__{'_'.join(ligand_names)}"
         pocket_to_nums[pocket["Pocket_Number"].values[0]] = (len(ligand_chains), len(protein_chains))
     df["pocket_ID"] = df["Pocket_Number"].apply(lambda x: pocket_to_id[x])
     df["num_ligands_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][0])
@@ -230,15 +241,6 @@ def label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file)
     uniprot_df["num_pdbs"] = uniprot_df["PDB"].apply(lambda x: len(x.split(";")))
     uniprot_id_to_num_pdbs = dict(zip(uniprot_df["SP_PRIMARY"], uniprot_df["num_pdbs"]))
     df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [sum(uniprot_id_to_num_pdbs.get(z, 0) for z in y.split(";")) for y in x] if str(x) != "nan" else np.nan)
-    return df
-
-def label_dates(df, date_dir):
-    dates = dict()
-    for date_file in tqdm(Path(date_dir).iterdir()):
-        with open(date_file) as f:
-            dates.update(json.load(f))
-    df["date"] = df["PDB_ID"].apply(lambda x: dates.get(x.upper(), np.nan))
-    df["year"] = df["date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
     return df
 
 def get_smtl_info(pdb_id, biounit, smtl_dir):
@@ -267,21 +269,21 @@ def label_smtl(df, smtl_dir, num_threads=20):
             annotations[(annotation["pdb_id"], annotation["biounit"])] = annotation
     for a in ["method", "oligo_state", "transmembrane", "resolution"]:
         df[a] = df.apply(lambda row: annotations.get((row["PDB_ID"], int(row["biounit"])), {}).get(a, np.nan), axis=1)
-    df["protein_chain_lengths"] = df.apply(lambda row: [annotations[(row["PDB_ID"], int(row["biounit"]))]["lengths"].get(y, np.nan) for y in row["prox_plip_chains"]] if (row["PDB_ID"], int(row["biounit"])) in annotations and str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+    df["single_pocket_chains"] = df.apply(lambda row: "_".join(sorted(row["prox_plip_chains"])) if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+    df["protein_chain_lengths"] = df.apply(lambda row: [annotations[(row["PDB_ID"], int(row["biounit"]))]["lengths"].get(y, np.nan) for y in row["single_pocket_chains"].split("_")] if (row["PDB_ID"], int(row["biounit"])) in annotations and str(row["single_pocket_chains"]) != "nan" else np.nan, axis=1)
     return df
 
-def create_dataset_files(dataset_dir, plip_file, validation_file, pocket_dir, components_file, cofactor_file, artifact_file, 
-                         smtl_dir, date_dir, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file, num_threads=20, overwrite=False):
+def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
+                         smtl_dir, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file, num_threads=20, overwrite=False):
     """
     dataset_dir: directory to save the dataset files
     plip_file: file with PLIP results
     validation_file: file with validation results
-    pocket_dir: directory with binding site files
+    cif_data_dir: directory with cif_data files (split by first two characters of PDB ID)
     components_file: file with PDB chemical component dictionary
     cofactor_file: file with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)
     artifact_file: file with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)
     smtl_dir: directory with SMTL files
-    date_dir: directory with PDB dates
     pdb_chain_uniprot_mapping_file: file with PDB to UniProt mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/pdb_chain_uniprot.tsv.gz)
     uniprot_pdb_mapping_file: file with UniProt to PDB mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/uniprot_pdb.tsv.gz)
     num_threads: number of threads to use
@@ -300,21 +302,20 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, pocket_dir, co
                     on=['joint_pocket_ID', "PDB_ID", "Ligand", "ligand_mmcif_chain"], 
                     how='outer')
         df["biounit"] = df["biounit"].fillna(1)
-        df = annotate_chains_and_residues(df, pocket_dir)
+        df["single_pocket_ID"] = df.apply(lambda row: f'{row["PDB_ID"]}__{int(row["biounit"])}__{row["ligand_mmcif_chain"]}', axis=1)
+        df = annotate_chains_and_residues(df, cif_data_dir)
         RDLogger.DisableLog('rdApp.*')
         parsed_components = ccd_reader.read_pdb_components_file(str(components_file))
         df = label_ligand_types(df, parsed_components, cofactor_file)
         df = label_artifacts(df, artifact_file)
         df = label_smtl(df, smtl_dir, num_threads=num_threads)
-        df = label_dates(df, date_dir)
         df = label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file)
-        df["single_pocket_ID"] = df.apply(lambda row: f'{row["PDB_ID"]}_{int(row["biounit"])}__{"_".join(sorted(row["prox_plip_chains"]))}__{row["ligand_mmcif_chain"]}__{row["Ligand"]}' if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
         df["has_plip"] = df["plip_pocket_ID"].notna()
         df["has_validation"] = df["validation_pocket_ID"].notna()
         df.to_csv(all_pockets_file, index=False)
     df = read_df(all_pockets_file)
     print("Number of pockets after merging PLIP and validation:", len(df), df["joint_pocket_ID"].nunique())
-    df = df[df["has_plip"] & df["has_bs"]].reset_index(drop=True)
+    df = df[df["has_plip"] & df["has_pocket"]].reset_index(drop=True)
     df = assign_pocket(df)
     print("Number of pockets after filtering for PLIP and binding sites and merging pockets")
     print("\tTotal rows:", len(df))
@@ -338,12 +339,11 @@ def main():
     parser.add_argument("dataset_dir", type=str, help="Directory to save the dataset files")
     parser.add_argument("plip_file", type=str, help="File with PLIP results")
     parser.add_argument("validation_file", type=str, help="File with validation results")
-    parser.add_argument("pocket_dir", type=str, help="Directory with binding site files")
+    parser.add_argument("cif_data_dir", type=str, help="Directory with cif_data files")
     parser.add_argument("components_file", type=str, help="File with PDB chemical component dictionary")
     parser.add_argument("cofactor_file", type=str, help="File with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)")
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
     parser.add_argument("smtl_dir", type=str, help="Directory with SMTL files")
-    parser.add_argument("date_dir", type=str, help="Directory with PDB dates")
     parser.add_argument("pdb_chain_uniprot_mapping_file", type=str, help="File with PDB to UniProt mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/pdb_chain_uniprot.tsv.gz)")
     parser.add_argument("uniprot_pdb_mapping_file", type=str, help="File with UniProt to PDB mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/uniprot_pdb.tsv.gz)")
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
