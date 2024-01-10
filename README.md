@@ -5,15 +5,15 @@
 ### Sources of pockets
 ![Sources of pockets](./figures/dataset_1.png)
 
-1. PDB - See `pockets.py`. For all non-polymer chains in the PDB, all polymer chain residues within 8A of the non-polymer chain, and the center of mass of the non-polymer chain are extracted.
-2. Validation criteria - See `validation.py`. Information is extracted for each pocket from the PDB validation report. This only applies to pockets from X-ray structures with EDS data (doesn't handle oligosaccharides and oligonucleotides).
-3. PLIP - See `plip.py`. Annotations detected by PLIP are extracted for each pocket in each biounit from SMTL.
+1. PDB - See `extract_cif_data.py`. For all non-polymer chains in the PDB, all polymer chain residues within 8A of the non-polymer chain, and the center of mass of the non-polymer chain are extracted. (This is done at the biounit level)
+2. Validation criteria - See `extract_validation_data.py`. Information is extracted for each pocket from the PDB validation report. This only applies to pockets from X-ray structures with EDS data (doesn't handle oligosaccharides and oligonucleotides, performed at asymmetric unit level).
+3. PLIP - See `extract_plip_data.py`. Annotations detected by PLIP are extracted for each pocket in each biounit from SMTL.
 
 ### Annotating pockets
-- All pockets and associated info from the 3 sources are merged into a single dataframe, using the PDB_ID and ligand_mmcif_chain as the key 
+- All pockets and associated info from the 3 sources are merged into a single dataframe, using the PDB_ID, biounit and ligand_mmcif_chain as the key (see `create_dataset.py`)
 - Referred to as single ligand pockets (SPLC) - consists of (PDB_ID, biounit, ligand_mmcif_chain, prox_plip_chains)
-- Ligands are labeled as (see `label_ligand_types` in `create_dataset.py`):
-    - cofactor
+- Ligands are labeled as (see `label_ligand_types`):
+    - cofactor (from PDBe and extra from )
     - drug-like
     - fragment
     - ion
@@ -25,8 +25,8 @@
     - Has >15 instances of the same ligand in the same PDB
     - Makes PLIP interactions with < 2 residues
     - Present >2500 times overall
-- PDB chains are linked to UniProt IDs and vice versa using the SIFTS database.
-- PDB entries are labeled with oligomeric state and transmembrane presence using SMTL
+- PDB chains are linked to UniProt IDs and vice versa using the SIFTS database. #TODO: use nextgen
+- PDB entries are labeled with oligomeric state and transmembrane presence using SMTL #TODO: use nextgen
 - SPLC are merged into multi-ligand pockets (PLC) if they share the same PDB_ID and biounit, and the ligands share a PLIP interaction.
 - Subsets are created by
     - filtering out PLC with only ions
@@ -37,7 +37,7 @@
 
 A Foldseek search is run on all PDB chains (parameters in `run_foldseek.sh`), and the alignments and per-residue lDDT scores are saved.
 
-The following scores are defined (see `clustering.py`):
+The following scores are defined (see `extract_scores.py`):
 - Protein similarity
     - protein_lddt: lDDT score
     - protein_lddt_qcov: lDDT x query coverage
@@ -46,16 +46,16 @@ The following scores are defined (see `clustering.py`):
 - Pocket similarity
     - pocket_qcov: Fraction of shared and aligned pocket residues
     - pocket_fident: Fraction of shared, aligned and identical pocket residues
-    - pocket_lddt_shared: Average lDDT of shared and aligned pocket residues
+    - pocket_lddt_qcov: Average lDDT of shared and aligned pocket residues
     - pocket_lddt: Average lDDT of query pocket residues
 - PLI similarity
 ![PLI similarity](./figures/pli_similarity.png)
 
-For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping is performed using the protein_lddt_qcov for protein chain mapping and the pocket_qcov for ligand chain mapping. Scores are combined by taking a length-weighted average of the scores for each chain pair, with protein chain length used for protein scores and number of pocket residues used for pocket scores.
+For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping is performed using the protein_lddt_qcov for protein chain mapping and the pocket_lddt_qcov for ligand chain mapping. Scores are combined by taking a length-weighted average of the scores for each chain pair, with protein chain length used for protein scores and number of pocket residues used for pocket scores.
 
 ### Clustering
 
-For each individual score, a directed graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.25, 0.5, 0.7, 0.99] for each score (see `label_protein_pocket_clusters` in `clustering.py`). Strongly connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
+For each individual score, a graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.5, 0.7, 0.99] for each score (see `label_protein_pocket_clusters` in `graph_clustering.py`). Connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
 
 ### Columns in the dataframe
 
@@ -79,7 +79,7 @@ prox_chains
 num_prox_chains	
 prox_residues	
 center_of_mass
-has_bs
+has_pocket
 
 # Validation related:
 validation_pocket_ID	
@@ -137,15 +137,15 @@ num_uniprot_ids
 num_pdbs_for_uniprots	
 
 # Component identifiers
-protein_qcov__0.25__component	protein_qcov__0.5__component	protein_qcov__0.7__component	protein_qcov__0.99__component	
-protein_fident__0.25__component	protein_fident__0.5__component	protein_fident__0.7__component	protein_fident__0.99__component	
-protein_lddt__0.25__component	protein_lddt__0.5__component	protein_lddt__0.7__component	protein_lddt__0.99__component	
-protein_lddt_qcov__0.25__component	protein_lddt_qcov__0.5__component	protein_lddt_qcov__0.7__component	protein_lddt_qcov__0.99__component	
+protein_qcov__0.5__component	protein_qcov__0.7__component	protein_qcov__0.99__component	
+protein_fident__0.5__component	protein_fident__0.7__component	protein_fident__0.99__component	
+protein_lddt__0.5__component	protein_lddt__0.7__component	protein_lddt__0.99__component	
+protein_lddt_qcov__0.5__component	protein_lddt_qcov__0.7__component	protein_lddt_qcov__0.99__component	
 
-pocket_fident__0.25__component	pocket_fident__0.5__component	pocket_fident__0.7__component	pocket_fident__0.99__component
-pocket_lddt__0.25__component	pocket_lddt__0.5__component	pocket_lddt__0.7__component	pocket_lddt__0.99__component	
-pocket_qcov__0.25__component	pocket_qcov__0.5__component	pocket_qcov__0.7__component	pocket_qcov__0.99__component	
-pocket_lddt_shared__0.25__component	pocket_lddt_shared__0.5__component	pocket_lddt_shared__0.7__component	pocket_lddt_shared__0.99__component	
+pocket_fident__0.5__component	pocket_fident__0.7__component	pocket_fident__0.99__component
+pocket_lddt__0.5__component	pocket_lddt__0.7__component	pocket_lddt__0.99__component	
+pocket_qcov__0.5__component	pocket_qcov__0.7__component	pocket_qcov__0.99__component	
+pocket_lddt_shared__0.5__component	pocket_lddt_shared__0.7__component	pocket_lddt_shared__0.99__component	
 
 plip_weighted_jaccard_nothreeletter__0.25__component	plip_weighted_jaccard_nothreeletter__0.5__component	plip_weighted_jaccard_nothreeletter__0.7__component	plip_weighted_jaccard_nothreeletter__0.99__component
 plip_weighted_jaccard_nothreeletterhydrophobic__0.25__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.5__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.7__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.99__component
