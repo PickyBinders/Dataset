@@ -7,7 +7,7 @@ OUTPUT_NAME=$4
 PDB_FS_DIR="$OUTPUT_DIR/foldseek_pdb"
 if [ ! -f "$OUTPUT_DIR/foldseek_pdb"]; then
     foldseek createdb "$PDB_DIR" "$PDB_FS_DIR" --chain-name-mode 1
-    foldseek createindex "$OPDB_FS_DIR" tmp
+    foldseek createindex "$PDB_FS_DIR" tmp
 fi
 
 POCKET_FS_DIR="$OUTPUT_DIR/$OUTPUT_NAME"
