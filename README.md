@@ -32,6 +32,7 @@
     - filtering out PLC with only ions
     - filtering out PLC with only ions and/or artifacts
 
+A pocket is defined by a PDB_ID, biounit, set of ligand chains and a set of interacting protein chains (i.e those with PLIP interactions to any of the ligand chains).
 
 ### Pocket similarity
 
@@ -56,6 +57,13 @@ For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping i
 ### Clustering
 
 For each individual score, a graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.5, 0.7, 0.99] for each score (see `label_protein_pocket_clusters` in `graph_clustering.py`). Connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
+
+### Linking apo and predicted structures
+For every UniProt ID associated with a small molecule pocket chain, apo and predicted structures are obtained where available. *Currently only implemented for pockets with a single interacting protein chain*.
+
+All protein chains in the PDB which are not participating in any small molecule pocket are considered for apo structure selection (except for chains in homomeric complexes where a different chain in the complex is participating in a small molecule pocket). There can be multiple apo chains for each UniProt ID. Predicted structures are obtained from AFDB, so there is only one predicted structure per UniProt ID. 
+
+For all apo and predicted structure hits, all protein scores and `pocket_lddt` to each corresponding query pocket are calculated. Only structures with a `protein_qcov` > 0.7 are considered. Apo structures are also annotated with whether the chain has an ion or artifact.
 
 ### Columns in the dataframe
 
