@@ -162,17 +162,22 @@ def label_ligand_types(df, parsed_components, cofactor_file):
     return df
 
 
-def load_cif_data(cif_data_dir):
-    cif_data = {
-        "dates": dict(),
-        "pockets": dict()
-    }
+def load_cif_data(cif_data_dir, names_to_load=None):
+    if names_to_load is None:
+        names_to_load = ["dates", "pockets", "uniprot_ids"]
+    cif_data = {x: dict() for x in names_to_load}
     for cif_data_file in tqdm(Path(cif_data_dir).iterdir()):
         with open(cif_data_file) as f:
             d = json.load(f)
-            cif_data["dates"].update(d["dates"])
-            cif_data["pockets"].update(d["pockets"])
+            for x in names_to_load:
+                cif_data[x].update(d[x])
     return cif_data
+
+def get_uniprot_to_chains(chain_to_uniprots):
+    uniprot_to_chains = defaultdict(set)
+    for chain, uniprot in tqdm(chain_to_uniprots.items()):
+        uniprot_to_chains[uniprot].add(chain)
+    return uniprot_to_chains
 
 def annotate_chains_and_residues(df, cif_data_dir):
     cif_data = load_cif_data(cif_data_dir)
@@ -185,6 +190,9 @@ def annotate_chains_and_residues(df, cif_data_dir):
     df["num_plip_interactions"] = df["hash"].apply(lambda x: len(str(x).split(";")) if x is not None and str(x) != "nan" else 0)
     df["num_unique_plip_interactions"] = df["hash"].apply(lambda x: len(set(str(x).split(";"))) if x is not None and str(x) != "nan" else 0)
     df["has_pocket"] = df["single_pocket_ID"].apply(lambda x: x in cif_data["pockets"])
+    df["UniProt_IDs"] = df.apply(lambda row: [cif_data["uniprot_ids"].get(f'{row["PDB_ID"]}_{y}', '') for y in sorted(row["prox_plip_chains"])] if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+    uniprot_to_chains = get_uniprot_to_chains(cif_data["uniprot_ids"])
+    df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [len(uniprot_to_chains.get(y, [])) for y in x] if str(x) != "nan" else np.nan)
     df["date"] = df["PDB_ID"].apply(lambda x: cif_data["dates"].get(x.upper(), np.nan))
     df["year"] = df["date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
     return df
@@ -231,17 +239,6 @@ def assign_pocket(df):
     df["num_ligands_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][0])
     df["num_chains_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][1])
     return df
-    
-def label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file):
-    pdb_uniprot = pnd.read_csv(pdb_chain_uniprot_mapping_file, sep="\t", comment="#")
-    pdb_chain_to_uniprots = pdb_uniprot.groupby(["PDB", "CHAIN"])["SP_PRIMARY"].apply(set).to_dict()
-    df["UniProt_IDs"] = df.apply(lambda row: [";".join(pdb_chain_to_uniprots.get((row["PDB_ID"], y), set())) for y in sorted(row["prox_plip_chains"])] if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
-    df["num_uniprot_ids"] = df["UniProt_IDs"].apply(lambda x: [len(y.split(";")) for y in x] if str(x) != "nan" else np.nan)
-    uniprot_df = pnd.read_csv(uniprot_pdb_mapping_file, comment="#", sep="\t")
-    uniprot_df["num_pdbs"] = uniprot_df["PDB"].apply(lambda x: len(x.split(";")))
-    uniprot_id_to_num_pdbs = dict(zip(uniprot_df["SP_PRIMARY"], uniprot_df["num_pdbs"]))
-    df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [sum(uniprot_id_to_num_pdbs.get(z, 0) for z in y.split(";")) for y in x] if str(x) != "nan" else np.nan)
-    return df
 
 def get_smtl_info(pdb_id, biounit, smtl_dir):
     smtl_dir = Path(smtl_dir)
@@ -274,7 +271,7 @@ def label_smtl(df, smtl_dir, num_threads=20):
     return df
 
 def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
-                         smtl_dir, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file, num_threads=20, overwrite=False):
+                         smtl_dir, num_threads=20, overwrite=False):
     """
     dataset_dir: directory to save the dataset files
     plip_file: file with PLIP results
@@ -284,8 +281,6 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, 
     cofactor_file: file with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)
     artifact_file: file with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)
     smtl_dir: directory with SMTL files
-    pdb_chain_uniprot_mapping_file: file with PDB to UniProt mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/pdb_chain_uniprot.tsv.gz)
-    uniprot_pdb_mapping_file: file with UniProt to PDB mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/uniprot_pdb.tsv.gz)
     num_threads: number of threads to use
     overwrite: whether to overwrite existing files
     """
@@ -309,7 +304,6 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, 
         df = label_ligand_types(df, parsed_components, cofactor_file)
         df = label_artifacts(df, artifact_file)
         df = label_smtl(df, smtl_dir, num_threads=num_threads)
-        df = label_uniprots(df, pdb_chain_uniprot_mapping_file, uniprot_pdb_mapping_file)
         df["has_plip"] = df["plip_pocket_ID"].notna()
         df["has_validation"] = df["validation_pocket_ID"].notna()
         df.to_csv(all_pockets_file, index=False)
@@ -344,8 +338,6 @@ def main():
     parser.add_argument("cofactor_file", type=str, help="File with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)")
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
     parser.add_argument("smtl_dir", type=str, help="Directory with SMTL files")
-    parser.add_argument("pdb_chain_uniprot_mapping_file", type=str, help="File with PDB to UniProt mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/pdb_chain_uniprot.tsv.gz)")
-    parser.add_argument("uniprot_pdb_mapping_file", type=str, help="File with UniProt to PDB mapping (ftp://ftp.ebi.ac.uk/pub/databases/msd/sifts/flatfiles/tsv/uniprot_pdb.tsv.gz)")
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
     parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
