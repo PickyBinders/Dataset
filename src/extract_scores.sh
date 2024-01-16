@@ -7,7 +7,7 @@ num_commands=1
 rm -f extract_scores_commands.cmd
 for folder in /scicore/data/managed/PDB/latest/data/structures/divided/mmCIF/*; do
     folder_stem=${folder##*/}
-    echo python similarity_scoring.py --df_file $df_file --cif_data_dir $cif_data_dir --prefix $folder_stem --aln_dir $aln_dir --score_dir $score_dir --overwrite >> extract_scores_commands.cmd
+    echo python extract_scores.py --df_file $df_file --cif_data_dir $cif_data_dir --prefix $folder_stem --aln_dir $aln_dir --score_dir $score_dir --overwrite >> extract_scores_commands.cmd
     num_commands=$((num_commands+1))
 done
 
