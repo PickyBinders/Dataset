@@ -137,10 +137,10 @@ def label_artifacts(df, artifact_file, within_entry_threshold=15, num_prox_plip_
     df["is_biolip_artifact"] = df["Ligand"].apply(lambda x: x in ignore_ligands)
     df["is_artifact"] = [False] * len(df)
     df.loc[df[df["Ligand"].isin(ignore_ligands)].groupby(["PDB_ID", "Ligand"]).filter(lambda x: len(x) > within_entry_threshold).index, "is_artifact"] = True
-    df["is_artifact"] = df["is_artifact"] | (df["num_prox_plip_residues"] < num_prox_plip_residues_threshold)
+    df["is_artifact"] = df["is_artifact"] | (df["is_biolip_artifact"] & (df["num_prox_plip_residues"] < num_prox_plip_residues_threshold))
     ligand_counts = dict(zip(df["Ligand"].value_counts().index, df["Ligand"].value_counts().values))
     common_ligands = set(str(x) for x in ligand_counts if ligand_counts[x] > common_ligand_threshold)
-    df["is_artifact"] = df["is_artifact"] | ((df["Ligand"].isin(ignore_ligands)) & (df["Ligand"].isin(common_ligands)) & (df["ligand_type"] != "cofactor"))
+    df["is_artifact"] = df["is_artifact"] | ((df["is_biolip_artifact"]) & (df["Ligand"].isin(common_ligands)) & (df["ligand_type"] != "cofactor"))
     return df
 
 def label_ligand_types(df, parsed_components, cofactor_file):
