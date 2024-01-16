@@ -25,7 +25,7 @@ def hash_plip(row):
     elif row["type"] == "pi_cation_interactions":
         return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_lig_group"], row["info_protcharged"]])
     elif row["type"] == "halogen_bonds":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_donortype"], row["info_acceptortype"], row["info_protisdon"]])
+        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_donortype"], row["info_acceptortype"]])
     return None
 
 @dataclass
@@ -125,6 +125,8 @@ def get_interactions_from_json(pdb_id, json_file: Path):
     errors = []
     for key in json_data['plip']:
         for interaction in json_data['plip'][key]:
+            if interaction['id'].split(":")[1] != "_":
+                continue
             try:
                 orig_pdb_chain_ligand = orig_pdb_mapping[str(interaction['position'])]
                 orig_cif_chain_ligand = orig_cif_mapping[str(interaction['position'])]
@@ -221,6 +223,7 @@ def main():
     from sys import argv
     smtl_dir, output_folder, n_threads = argv[1:]
     output_folder = Path(output_folder)
+    smtl_dir = Path(smtl_dir)
     num_per_folder = {d: sum(1 for _ in d.iterdir()) for d in smtl_dir.iterdir()}
     sorted_names = sorted(num_per_folder, key=lambda x: num_per_folder[x], reverse=True)
     with Pool(int(n_threads)) as p:
