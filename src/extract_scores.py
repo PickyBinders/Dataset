@@ -1,11 +1,11 @@
 from tqdm import tqdm
 from pathlib import Path
-from collections import Counter, defaultdict
+from collections import defaultdict
 import numpy as np
 from dataclasses import dataclass
 import typing as ty
 from create_dataset import read_df, load_cif_data
-from scripts.extract_plip_data import PLIPHash
+from extract_plip_data import PLIPHash
 
 ALN_COLUMNS = "query,target,qlen,lddt,fident,alnlen,qstart,qend,tstart,tend,evalue,bits,qcov,tcov,qaln,taln,lddtfull".split(",")
 
@@ -57,7 +57,7 @@ def load_alignments(aln_file):
 @dataclass
 class PLCScorer:
     entry_to_pockets: ty.Dict[str, ty.List[str]]
-    pocket_to_hash: ty.Dict[str, ty.Dict[str, ty.DefaultDict[str, ty.Dict[int, ty.Counter[PLIPHash]]]]]
+    pocket_to_hash: ty.Dict[str, ty.Dict[str, ty.Dict[str, ty.Dict[int, ty.DefaultDict[str, int]]]]]
     pocket_residues: ty.Dict[str, ty.DefaultDict[str, ty.Dict[int, int]]]
     protein_chain_lengths: ty.Dict[str, ty.Dict[str, int]]
 
@@ -67,26 +67,28 @@ class PLCScorer:
         df = read_df(df_file)
         single_pocket_ids = set(df["single_pocket_ID"])
         pocket_residues = {}
-        pocket_to_hash = {}
+        pocket_to_hash = {plip_suffix: {} for plip_suffix in PLIP_SUFFIXES}
         for single_pocket_id, pocket in tqdm(cif_data["pockets"].items()):
             if single_pocket_id not in single_pocket_ids:
                 continue
             pocket_residues[single_pocket_id] = defaultdict(dict)
-            pocket_to_hash[single_pocket_id] = {plip_suffix: defaultdict(set) for plip_suffix in PLIP_SUFFIXES}
-            for residue in pocket["pocket_residues"]:
-                pocket_residues[single_pocket_id][residue['chain']][residue['residue_index']]: residue["residue_number"]
-        entry_to_pockets = df.groupby("PDB_ID").apply(lambda x: x["pocket_ID"].unique()).to_dict()
-        plip_weights = {p: Counter() for p in PLIP_SUFFIXES}
-        for single_pocket_id, plip_hash in tqdm(zip(df["single_pocket_ID"], df["hash"])):
-            if str(plip_hash) == "nan":
-                continue
-            plip_hash = PLIPHash.from_string(plip_hash)
-            if plip_hash.residue not in pocket_residues[single_pocket_id][plip_hash.chain]:
-                pocket_residues[single_pocket_id][plip_hash.chain][plip_hash.residue] = defaultdict(int)
             for plip_suffix in PLIP_SUFFIXES:
-                h_string = plip_hash.to_string(plip_suffix)
-                if h_string is not None:
-                    pocket_to_hash[single_pocket_id][plip_suffix][plip_hash.chain][plip_hash.residue][h_string] += 1
+                pocket_to_hash[plip_suffix][single_pocket_id] = defaultdict(dict)
+            for residue in pocket["pocket_residues"]:
+                pocket_residues[single_pocket_id][residue['chain']][residue['residue_index']] = residue["residue_number"]
+        entry_to_pockets = df.groupby("PDB_ID").apply(lambda x: x["pocket_ID"].unique()).to_dict()
+        for single_pocket_id, plip_hashes in tqdm(zip(df["single_pocket_ID"], df["hash"])):
+            if str(plip_hashes) == "nan":
+                continue
+            for plip_hash in plip_hashes.split(";"):
+                plip_hash = PLIPHash.from_string(plip_hash)
+                for plip_suffix in PLIP_SUFFIXES:
+                    res = int(plip_hash.residue)
+                    if res not in pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain]:
+                        pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res] = defaultdict(int)
+                    h_string = plip_hash.to_string(plip_suffix)
+                    if h_string is not None:
+                        pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res][h_string] += 1
         protein_chain_lengths = defaultdict(dict)
         for entry, chains, chain_lengths in tqdm(zip(df["PDB_ID"], df["single_pocket_chains"], df["protein_chain_lengths"])):
             if str(chains) == "nan":
@@ -95,7 +97,7 @@ class PLCScorer:
                 if length == "nan":
                     continue
                 protein_chain_lengths[entry][chain] = int(length)
-        return cls(entry_to_pockets, pocket_to_hash, plip_weights, pocket_residues, protein_chain_lengths)
+        return cls(entry_to_pockets, pocket_to_hash, pocket_residues, protein_chain_lengths)
     
     def get_protein_scores_pair(self, aln):
         scores = {
@@ -134,7 +136,7 @@ class PLCScorer:
                             scores[f"{score}_max"] = pair_scores[score]
                             mappings[f"{score}_max"] = [(q_chain, t_chain)]
         for score in scores:
-            if score.endswith("_weighted_max"):
+            if score.endswith("_weighted_max") and max_chain_lengths[score] > 0:
                 scores[score] /= max_chain_lengths[score]
 
         # do chain mapping
@@ -173,7 +175,12 @@ class PLCScorer:
         pli_scores = {}
         for plip_suffix in PLIP_SUFFIXES:
             pli_scores["pli_qcov" + plip_suffix] = 0
+        q_plip = {}
+        t_plip = {}
         for q_chain, t_chain in alns:
+            for plip_suffix in PLIP_SUFFIXES:
+                q_plip[plip_suffix] = self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain]
+                t_plip[plip_suffix] = self.pocket_to_hash[plip_suffix][t_single_pocket][t_chain]
             aln = alns[(q_chain, t_chain)]
             q_i, t_i = int(aln['qstart']), int(aln['tstart'])
             for q_a, t_a, lddt in zip(aln['qaln'], aln['taln'], aln['lddtfull'].split(",")):
@@ -189,7 +196,8 @@ class PLCScorer:
                         if q_a == t_a:
                             pocket_scores["pocket_fident"] += 1
                         for plip_suffix in PLIP_SUFFIXES:
-                            pli_scores[f"pli_qcov{plip_suffix}"] += sum((self.pocket_to_hash[q_single_pocket][plip_suffix][q_chain][q_n] & self.pocket_to_hash[t_single_pocket][plip_suffix][t_chain][t_n]).values())
+                            if q_n in q_plip[plip_suffix] and t_n in t_plip[plip_suffix]:
+                                pli_scores[f"pli_qcov{plip_suffix}"] += sum((q_plip[plip_suffix][q_n] & t_plip[plip_suffix][t_n]).values())
                 if t_a != "-":
                     t_i += 1
                 if q_a != "-":
@@ -214,14 +222,14 @@ class PLCScorer:
         s_matrix = np.zeros((len(q_single_pockets), len(t_single_pockets)))
 
         for i, q_single_pocket in enumerate(q_single_pockets):
-            if q_single_pocket not in self.pocket_residues or q_single_pocket not in self.pocket_to_hash:
+            if q_single_pocket not in self.pocket_residues:
                 continue
             pocket_length = sum(len(p) for p in self.pocket_residues[q_single_pocket].values())
             pli_lengths = {}
             for plip_suffix in PLIP_SUFFIXES:
-                pli_lengths[plip_suffix] = sum(sum(self.pocket_to_hash[q_single_pocket][plip_suffix][q_chain][q_res].values()) for q_chain in self.pocket_to_hash[q_single_pocket][plip_suffix] for q_res in self.pocket_to_hash[q_single_pocket][plip_suffix][q_chain])
+                pli_lengths[plip_suffix] = sum(sum(self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain][q_res].values()) for q_chain in self.pocket_to_hash[plip_suffix][q_single_pocket] for q_res in self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain])
             for j, t_single_pocket in enumerate(t_single_pockets):
-                if t_single_pocket not in self.pocket_residues or t_single_pocket not in self.pocket_to_hash:
+                if t_single_pocket not in self.pocket_residues:
                     continue
                 pocket_pair_scores, pli_pair_scores = self.get_pocket_pli_scores_pair(alns, q_single_pocket, t_single_pocket)
                 s_matrix[i, j] = pocket_pair_scores[LIGAND_CHAIN_MAPPER] / pocket_length
@@ -242,7 +250,14 @@ class PLCScorer:
                     if pli_pair_scores[score] / pli_lengths[plip_suffix] > pli_scores[f"{score}_max"]:
                         pli_scores[f"{score}_max"] = pli_pair_scores[score] / pli_lengths[plip_suffix]
                         pli_mappings[f"{score}_max"] = [(q_single_pocket, t_single_pocket)]
-        
+        for score in pocket_scores:
+            if score.endswith("_weighted_max") and max_pocket_lengths[score] > 0:
+                pocket_scores[score] /= max_pocket_lengths[score]
+        for plip_suffix in PLIP_SUFFIXES:
+            score = f"pli_qcov{plip_suffix}_weighted_max"
+            if max_pli_lengths[score] > 0:
+                pli_scores[score] /= max_pli_lengths[score]
+
         while np.any(s_matrix):
             score = np.amax(s_matrix)
             if score == 0:
@@ -277,7 +292,7 @@ class PLCScorer:
             q_pli_lengths = defaultdict(int)
             for plip_suffix in PLIP_SUFFIXES:
                 for q_single_pocket in q_single_pockets:
-                    q_pli_lengths[plip_suffix] += sum(sum(self.pocket_to_hash[q_single_pocket][plip_suffix][q_chain][q_res].values()) for q_chain in self.pocket_to_hash[q_single_pocket][plip_suffix] for q_res in self.pocket_to_hash[q_single_pocket][plip_suffix][q_chain])
+                    q_pli_lengths[plip_suffix] += sum(sum(self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain][q_res].values()) for q_chain in self.pocket_to_hash[plip_suffix][q_single_pocket] for q_res in self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain])
         
             for t_entry in q_alignments:
                 if any(q_chain in q_alignments[t_entry] for q_chain in q_chains):
@@ -293,7 +308,7 @@ class PLCScorer:
                         q_t_scores = {}
 
                         # Protein score calculation
-                        protein_mappings, protein_scores, alns = self.get_protein_scores(q_alignments, q_chains, q_entry, t_entry, t_chains, q_length)
+                        protein_mappings, protein_scores, alns = self.get_protein_scores(q_alignments, q_entry, q_chains, t_entry, t_chains, q_length)
                         if len(alns) == 0:
                             continue
                         for key in protein_scores:

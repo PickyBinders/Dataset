@@ -51,7 +51,10 @@ class PLIPHash:
     @classmethod
     def from_string(cls, string):
         chain, residue, type, three_letters, *attributes = string.split("__")
-        attributes = dict(x.split(":") for x in attributes)
+        if ':' in attributes[0]:
+            attributes = dict(x.split(":") for x in attributes)
+        else:
+            attributes = {}
         return cls(chain, residue, type, three_letters, attributes)
 
 @dataclass
