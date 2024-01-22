@@ -6,27 +6,56 @@ import pandas as pnd
 import json
 from multiprocessing import Pool
 from tqdm import tqdm
-from sys import argv
 from collections import defaultdict
 
-def hash_plip(row):
-    if row["type"] == "hydrogen_bonds":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_donortype"], row["info_acceptortype"], row["info_protisdon"], row["info_sidechain"]])
-    elif row["type"] == "hydrophobic_interactions":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"]])
-    elif row["type"] == "salt_bridges":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_lig_group"], row["info_protispos"]])
-    elif row["type"] == "water_bridges":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_donortype"], row["info_acceptortype"], row["info_protisdon"]])
-    elif row["type"] == "metal_complexes":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_metal_type"], row["info_target_type"], int(row["info_coordination"]), row["info_geometry"], row["info_location"]])
-    elif row["type"] == "pi_stacks":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_type"]])
-    elif row["type"] == "pi_cation_interactions":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_lig_group"], row["info_protcharged"]])
-    elif row["type"] == "halogen_bonds":
-        return ":".join(str(x) for x in [row["type"], row["three_letters"], row["info_donortype"], row["info_acceptortype"]])
-    return None
+@dataclass 
+class PLIPHash:
+    chain: str
+    residue: int
+    type: str
+    three_letter_code: str
+    attributes: ty.Dict[str, str]
+
+    @classmethod
+    def from_row(cls, row):
+        attributes = {}
+        if row["type"] == "hydrogen_bonds":
+            attributes = {"donortype": row["info_donortype"], "acceptortype": row["info_acceptortype"], "protisdon": row["info_protisdon"], "sidechain": row["info_sidechain"]}
+        elif row["type"] == "hydrophobic_interactions":
+            attributes = {}
+        elif row["type"] == "salt_bridges":
+            attributes = {"lig_group": row["info_lig_group"], "protispos": row["info_protispos"]}
+        elif row["type"] == "water_bridges":
+            attributes = {"donortype": row["info_donortype"], "acceptortype": row["info_acceptortype"], "protisdon": row["info_protisdon"]}
+        elif row["type"] == "metal_complexes":
+            attributes = {"metal_type": row["info_metal_type"], "target_type": row["info_target_type"], "coordination": int(row["info_coordination"]), "geometry": row["info_geometry"], "location": row["info_location"]}
+        elif row["type"] == "pi_stacks":
+            attributes = {"type": row["info_type"]}
+        elif row["type"] == "pi_cation_interactions":
+            attributes = {"lig_group": row["info_lig_group"], "protcharged": row["info_protcharged"]}
+        elif row["type"] == "halogen_bonds":
+            attributes = {"donortype": row["info_donortype"], "acceptortype": row["info_acceptortype"]}
+        return cls(row["orig_cif_chain"], row["position"], row["type"], row["three_letters"], attributes)
+    
+    def to_string(self, hash_type="all"):
+        if hash_type == "all": return "__".join(str(x) for x in [self.chain, self.residue, self.type, self.three_letter_code]) + "__" + "__".join(f"{k}:{v}" for k, v in self.attributes.items())
+        elif hash_type == "_residue": return "__".join(str(x) for x in [self.type, self.three_letter_code]) + "__" + "__".join(f"{k}:{v}" for k, v in self.attributes.items())
+        elif hash_type == "_nowater": 
+            if self.type == "water_bridges": 
+                return None 
+            else: 
+                return self.to_string(hash_type="")
+        elif hash_type == "": return f"{self.type}__" + "__".join(f"{k}:{v}" for k, v in self.attributes.items())
+        else: raise ValueError(f"Invalid plip type: {hash_type}")
+
+    @classmethod
+    def from_string(cls, string):
+        chain, residue, type, three_letters, *attributes = string.split("__")
+        if ':' in attributes[0]:
+            attributes = dict(x.split(":") for x in attributes)
+        else:
+            attributes = {}
+        return cls(chain, residue, type, three_letters, attributes)
 
 @dataclass
 class PLIPInteraction:
@@ -86,7 +115,7 @@ def interactions_to_dataframe(interactions: ty.List[PLIPInteraction]) -> pnd.Dat
     df = df.join(df["extra"].apply(pnd.Series).add_prefix("info_"))
     df = df.join(df["info_extra"].apply(pnd.Series).add_prefix("info_"))
     df = df.drop(columns=["extra", "info_extra"])
-    df["hash"] = df.apply(hash_plip, axis=1)
+    df["hash"] = df.apply(lambda row: PLIPHash.from_row(row).to_string(), axis=1)
     df["info_restype_lig"] = df["info_restype_lig"].apply(lambda x: "SODIUM" if str(x) == "nan" else x)
     df = df[df["hash"].notnull()].reset_index(drop=True)
     df = df.drop_duplicates(subset=["pdb_id", "biounit", "orig_cif_chain", "orig_cif_chain_ligand", "position", "hash"], keep="first")
@@ -182,7 +211,7 @@ def interactions_from_folder(super_pdb_folder_output_folder, overwrite=True):
 
 def group_interactions(output_folder):
     """
-    Groups all interactions belonging to a single ligand pcoket SPLC
+    Groups all interactions belonging to a single ligand pocket SPLC
     defined by the PDB ID, biounit, ligand name and ligand MMCIF chain.
     """
     output_folder = Path(output_folder)
