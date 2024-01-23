@@ -28,7 +28,7 @@ class PLIPHash:
         elif row["type"] == "water_bridges":
             attributes = {"donortype": row["info_donortype"], "acceptortype": row["info_acceptortype"], "protisdon": row["info_protisdon"]}
         elif row["type"] == "metal_complexes":
-            attributes = {"metal_type": row["info_metal_type"], "target_type": row["info_target_type"], "coordination": int(row["info_coordination"]), "geometry": row["info_geometry"], "location": row["info_location"]}
+            attributes = {"metal_type": row["info_metal_type"], "target_type": row["info_target_type"], "coordination": row["info_coordination"], "geometry": row["info_geometry"], "location": row["info_location"]}
         elif row["type"] == "pi_stacks":
             attributes = {"type": row["info_type"]}
         elif row["type"] == "pi_cation_interactions":
@@ -123,12 +123,11 @@ def interactions_to_dataframe(interactions: ty.List[PLIPInteraction]) -> pnd.Dat
 
 def get_interactions_from_json(pdb_id, json_file: Path):
     """Extracts interactions from a PLIP JSON file."""
-    biounit = json_file.stem.split(".")[1]
     with open(json_file) as f:
         json_data = json.load(f)
     if json_data["status"] == "deleted" or 'plip' not in json_data or json_data['plip'] is None:
         return [], []
-    
+    biounit = json_data["mmcif_id"]
     # Get the mapping between the original MMCIF chains and the chains used by PLIP
     orig_pdb_mapping = {}
     orig_cif_mapping = {}

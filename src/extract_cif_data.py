@@ -1,12 +1,11 @@
-from ost import io
-from ost import mol
+from ost import io, mol
 
 from pathlib import Path
 import json
 import logging
 from tqdm import tqdm
 
-def extract_cif_data(cif_dir, out_file, ignore, threshold=8):
+def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
     """
     Extracts dates for each PDB ID and binding site residues and center of mass for each ligand in each structure in the given directory.
     The binding site residues are defined as all residues within a given distance threshold from the ligand.
@@ -53,6 +52,7 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=8):
                     selection = biounit.Select(f"{threshold} <> [cname='{ligand.chain.name}' and rnum={ligand.number.num}] and protein=True")
                     try:
                         pocket = [{"chain": r.chain.name.split(".")[-1], 
+                                   "instance": r.chain.name.split(".")[0],
                                 "one_letter_code": r.one_letter_code, 
                                 "residue_index": resnum_mapping[r.chain.name][r.number.num], 
                                 "residue_number": r.number.num} for r in selection.residues]
@@ -73,7 +73,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("cif_dir", help="Directory containing the CIF files")
     parser.add_argument("out_file", help="Output file")
-    parser.add_argument("--threshold", help="Distance threshold for binding site residues", default=8)
+    parser.add_argument("--threshold", help="Distance threshold for binding site residues", default=6)
     parser.add_argument("--ignore", help="PDB IDs to ignore", nargs="+", default=[]) # to ignore some pathological cases
     args = parser.parse_args()
     extract_cif_data(args.cif_dir, args.out_file, args.ignore, args.threshold)

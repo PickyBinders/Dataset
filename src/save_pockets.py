@@ -1,9 +1,7 @@
+import json
 from ost import conop, mol, io
 from pathlib import Path
 from tqdm import tqdm
-import pandas as pnd
-from Bio.PDB import PDBParser
-from Bio.PDB.mmcifio import MMCIFIO
 from multiprocessing import Pool
 import logging
 
@@ -11,10 +9,8 @@ import logging
 PROTEIN_CHAINS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 LIGAND_CHAINS = PROTEIN_CHAINS.lower() + '0123456789'
 
-def filter_and_rename_chains(ent, protein_chains, ligand_chains):
-    # Create a subset entity with the selected chains
-    ent_selected = mol.CreateEntityFromView(ent.Select(" or ".join(f"chain='{c}'" for c in protein_chains + ligand_chains)), True)
 
+def rename_chains(ent, ent_selected, protein_chains, ligand_chains):
     # Intermediate renaming step
     intermediate_names = {}
     edi = ent_selected.EditXCS(mol.BUFFERED_EDIT)
@@ -42,8 +38,7 @@ def filter_and_rename_chains(ent, protein_chains, ligand_chains):
         edi.SetChainType(chain, original_chain.type)
         name_mapping[original_name] = final_name
     edi.UpdateICS()
-    name_mapping_reverse = {v: k for k, v in name_mapping.items()}
-    return name_mapping, name_mapping_reverse, ent_selected
+    return name_mapping, ent_selected
 
 def load_biounit_seqres(cif_file, biounit_id):
     try:
@@ -59,46 +54,33 @@ def load_biounit_seqres(cif_file, biounit_id):
         return None, None
     return biounit, seqres
 
-def save_ligands(new_ent, ligand_chains, output_prefix, name_mapping):
-    for original_ligand_chain in ligand_chains:
-        if original_ligand_chain not in name_mapping:
-            logging.error(f"Could not find ligand chain {original_ligand_chain} in {output_prefix}")
-            return
-        new_ligand_chain = name_mapping[original_ligand_chain]
-        ligand = new_ent.Select(f"chain='{new_ligand_chain}'")
+def save_ligands(ent, ligand_chains, output_prefix):
+    for ligand_chain in ligand_chains:
+        ligand = ent.Select(f"chain='{ligand_chain}'")
         try:
-            io.SaveEntity(ligand, f"{output_prefix}__{new_ligand_chain}__{original_ligand_chain}.sdf")
+            io.SaveEntity(ligand, f"{output_prefix}__{ligand_chain}.sdf")
         except Exception as e:
-            logging.error(f"Could not save ligand {original_ligand_chain} in {output_prefix}: {e}")
+            logging.error(f"Could not save ligand {ligand_chain} in {output_prefix}: {e}")
             return
 
-def save_sequences(new_ent, output_fasta_file, chain_to_sequence, name_mapping_reverse):
+def save_sequences(ent, output_fasta_file, chain_to_sequence):
      with open(output_fasta_file, "w") as f:
-        for x in new_ent.chains:
-            if x.name not in name_mapping_reverse:
-                logging.error(f"Could not find chain {x.name} in {output_fasta_file}")
-                return
-            original_chain = name_mapping_reverse[x.name]
-            if original_chain in chain_to_sequence:
-                f.write(f">{x.name}__{original_chain}\n")
-                f.write(chain_to_sequence[original_chain] + "\n")
+        for x in ent.chains:
+            if x.name in chain_to_sequence:
+                f.write(f">{x.name}\n")
+                f.write(chain_to_sequence[x.name] + "\n")
 
-def save_pdb_cif_files(new_ent, pocket_name, output_pdb_file, output_cif_file):
-    #TODO replace biopython mmcif writer with ost MMCifWriter
+def save_pdb_cif_files(ent, ent_renamed, output_pdb_file, output_cif_file, name_mapping, output_mapping_file):
     try:
-        io.SavePDB(new_ent, str(output_pdb_file))
+        io.SavePDB(ent_renamed, str(output_pdb_file))
+        with open(output_mapping_file, "w") as f:
+            json.dump(name_mapping, f)
     except Exception as e:
         logging.error(f"Could not save {output_pdb_file}: {e}")
-        return
     try:
-        parser = PDBParser()
-        structure = parser.get_structure(pocket_name, str(output_pdb_file))
-        mmcif_io = MMCIFIO()
-        mmcif_io.set_structure(structure)
-        mmcif_io.save(str(output_cif_file))
+        io.SaveMMCIF(ent, str(output_cif_file))
     except Exception as e:
         logging.error(f"Could not save {output_cif_file}: {e}")
-        return
 
 def save_pocket(pocket_name, cif_folder, output_folder, compound_lib):
     pdb_id, biounit_id, protein_chains, ligand_chains, _ = pocket_name.split("__")
@@ -111,6 +93,7 @@ def save_pocket(pocket_name, cif_folder, output_folder, compound_lib):
         logging.info(f"{cif_file} does not exist")
         return
     output_pdb_file = Path(output_folder) / "pdb_files" / f"{pocket_name}.pdb"
+    output_name_mapping_file = Path(output_folder) / "pdb_files" / f"{pocket_name}.json"
     output_cif_file = Path(output_folder) / "cif_files" / f"{pocket_name}.cif"
     output_fasta_file = Path(output_folder) / "fasta_files" / f"{pocket_name}.fasta"
     output_ligand_prefix = str(Path(output_folder) / "ligand_files" / f"{pocket_name}")
@@ -120,13 +103,15 @@ def save_pocket(pocket_name, cif_folder, output_folder, compound_lib):
     biounit, seqres = load_biounit_seqres(cif_file, biounit_id)
     if biounit is None or seqres is None:
         return
-    chain_to_sequence = {f"1.{s.name}": s.string for s in seqres if s.name in protein_chains}
-    protein_chains = [f"1.{x}" for x in protein_chains]
-    ligand_chains = [f"1.{x}" for x in ligand_chains]
-    name_mapping, name_mapping_reverse, new_ent = filter_and_rename_chains(biounit, protein_chains, ligand_chains)
-    save_ligands(new_ent, ligand_chains, output_ligand_prefix, name_mapping)
-    save_sequences(new_ent, output_fasta_file, chain_to_sequence, name_mapping_reverse)
-    save_pdb_cif_files(new_ent, pocket_name, output_pdb_file, output_cif_file)
+    chain_to_sequence = {s.name: s.string for s in seqres if s.name in protein_chains}
+    protein_chains = [str(x) for x in biounit.GetChainList() if x.name.split(".")[-1] in protein_chains]
+    chain_to_sequence = {x: chain_to_sequence[x.split(".")[-1]] for x in protein_chains}
+    ligand_chains = [str(x) for x in biounit.GetChainList() if x.name.split(".")[-1] in ligand_chains]
+    ent_selected = mol.CreateEntityFromView(biounit.Select(" or ".join(f"chain='{c}'" for c in protein_chains + ligand_chains)), True)
+    name_mapping, ent_renamed = rename_chains(biounit, ent_selected, protein_chains, ligand_chains)
+    save_ligands(ent_selected, ligand_chains, output_ligand_prefix)
+    save_sequences(ent_selected, output_fasta_file, chain_to_sequence)
+    save_pdb_cif_files(ent_selected, ent_renamed, output_pdb_file, output_cif_file, name_mapping, output_name_mapping_file)
 
 def save_pocket_star(input_args):
     return save_pocket(*input_args)

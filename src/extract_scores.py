@@ -22,7 +22,7 @@ def make_subset_files(df, folder, name):
     """
     num_chains = 0
     folder = Path(folder)
-    subset_folder = folder / f"{name}_subsets"
+    subset_folder = folder / "subset_files"
     subset_folder.mkdir(exist_ok=True)
     with open(folder / f"{name}.txt" , "w") as f:
         for pdb_id, rows in tqdm(df.groupby("PDB_ID")):
