@@ -361,19 +361,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--df_file", type=Path, required=True)
     parser.add_argument("--cif_data_dir", type=Path, required=True)
-    parser.add_argument("--prefix", type=str, required=True)
-    parser.add_argument("--aln_dir", type=Path, required=True)
-    parser.add_argument("--score_dir", type=str, required=True)
+    parser.add_argument("--aln_file", type=Path, required=True)
+    parser.add_argument("--score_file", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
     
     args = parser.parse_args()
-    score_dir = Path(args.score_dir)
-    score_dir.mkdir(exist_ok=True)
-    score_file = score_dir / f"{args.prefix}_scores.tsv"
-    aln_file = args.aln_dir / f"aln_{args.prefix}.tsv"
-    if aln_file.exists() and (not score_file.exists() or args.overwrite):
+    if args.aln_file.exists() and (not args.score_file.exists() or args.overwrite):
         plc = PLCScorer.initialise(args.df_file, args.cif_data_dir)
-        plc.write_scores(aln_file, score_file)
+        plc.write_scores(args.aln_file, args.score_file)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
 import networkx as nx
 from tqdm import tqdm
-import pandas as pnd
 from pathlib import Path
-from similarity_scoring import SCORE_COLUMNS
+import extract_scores
 import numpy as np
 import json
 
@@ -24,13 +23,19 @@ def label_protein_pocket_clusters(score_files, score_name, thresholds, strong=Tr
         graph = nx.DiGraph()
     else:
         graph = nx.Graph()
+    columns = extract_scores.INFO_COLUMNS
+    for suffix in ["_weighted_sum", "_weighted_max", "_max"]:
+        for s in extract_scores.SCORE_NAMES:
+            columns.append(f"{s}{suffix}")
+            if suffix != "_weighted_sum":
+                columns.append(f"{s}{suffix}_mapping")
     for score_file in tqdm(score_files):
         with open(score_file) as f:
             for i, line in enumerate(f):
                 if i == 0:
                     continue
                 parts = line.strip().split("\t")
-                parts = dict(zip(SCORE_COLUMNS, parts))
+                parts = dict(zip(columns, parts))
                 score = float(parts[score_name])
                 if score < thresholds[0] or np.isnan(score) or str(score) == "nan":
                     continue
@@ -47,7 +52,7 @@ def label_df(pocket_df, cluster_dir):
             key_to_component = json.load(f)
         score_name, strong = cluster_file.stem.split("__")
         for key in key_to_component:
-            col = f"{score_name}__{key}__{strong}_component"
+            col = f"{score_name}__{key}__{strong}__component"
             pocket_df[col] = pocket_df["pocket_ID"].apply(lambda x: key_to_component[key].get(x, None))
             max_component = int(pocket_df[col].max()) + 1
             pocket_df.loc[pocket_df[col].isnull(), col] = [int(max_component) + i for i in range(len(pocket_df[pocket_df[col].isnull()]))]

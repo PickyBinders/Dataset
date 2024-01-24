@@ -70,13 +70,15 @@ def save_sequences(ent, output_fasta_file, chain_to_sequence):
                 f.write(f">{x.name}\n")
                 f.write(chain_to_sequence[x.name] + "\n")
 
-def save_pdb_cif_files(ent, ent_renamed, output_pdb_file, output_cif_file, name_mapping, output_mapping_file):
+def save_pdb_file(ent_renamed, output_pdb_file, name_mapping, output_mapping_file):
     try:
         io.SavePDB(ent_renamed, str(output_pdb_file))
         with open(output_mapping_file, "w") as f:
             json.dump(name_mapping, f)
     except Exception as e:
         logging.error(f"Could not save {output_pdb_file}: {e}")
+
+def save_cif_file(ent, output_cif_file):
     try:
         io.SaveMMCIF(ent, str(output_cif_file))
     except Exception as e:
@@ -111,7 +113,8 @@ def save_pocket(pocket_name, cif_folder, output_folder, compound_lib):
     name_mapping, ent_renamed = rename_chains(biounit, ent_selected, protein_chains, ligand_chains)
     save_ligands(ent_selected, ligand_chains, output_ligand_prefix)
     save_sequences(ent_selected, output_fasta_file, chain_to_sequence)
-    save_pdb_cif_files(ent_selected, ent_renamed, output_pdb_file, output_cif_file, name_mapping, output_name_mapping_file)
+    save_pdb_file(ent_renamed, output_pdb_file, name_mapping, output_name_mapping_file)
+    save_cif_file(ent_selected, output_cif_file)
 
 def save_pocket_star(input_args):
     return save_pocket(*input_args)
@@ -134,7 +137,7 @@ def main():
     with open(args.pocket_names_file) as f:
         for line in f:
             pocket_name = line.strip()
-            pdb_id, biounit_id, protein_chains, ligand_chains, _ = pocket_name.split("__")
+            _, _, protein_chains, ligand_chains, _ = pocket_name.split("__")
             protein_chains, ligand_chains = protein_chains.split("_"), ligand_chains.split("_")
             if len(protein_chains) > args.max_protein_chains or len(ligand_chains) > args.max_ligand_chains:
                 logging.info(f"Too many chains for {pocket_name}")
