@@ -32,6 +32,7 @@
     - filtering out PLC with only ions
     - filtering out PLC with only ions and/or artifacts
 
+A pocket is defined by a PDB_ID, biounit, set of ligand chains and a set of interacting protein chains (i.e those with PLIP interactions to any of the ligand chains).
 
 ### Pocket similarity
 
@@ -45,9 +46,10 @@ The following scores are defined (see `extract_scores.py`):
     - protein_qcov: query coverage
 - Pocket similarity
     - pocket_qcov: Fraction of shared and aligned pocket residues
-    - pocket_fident: Fraction of shared, aligned and identical pocket residues
+    - pocket_fident: Fraction of shared and aligned pocket residues which are identical
     - pocket_lddt_qcov: Average lDDT of shared and aligned pocket residues
     - pocket_lddt: Average lDDT of query pocket residues
+    - pocket_fident_query: Fraction of query pocket residues which are identical to the aligned target residues
 - PLI similarity
 ![PLI similarity](./figures/pli_similarity.png)
 
@@ -56,6 +58,17 @@ For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping i
 ### Clustering
 
 For each individual score, a graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.5, 0.7, 0.99] for each score (see `label_protein_pocket_clusters` in `graph_clustering.py`). Connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
+
+### Linking apo and predicted structures
+For every small molecule pocket chain, apo and predicted structures are obtained where available. *Currently only implemented for pockets with a single interacting protein chain*.
+
+All protein chains in the PDB which are not participating in any small molecule pocket are considered for apo structure selection (except for chains in homomeric complexes where a different chain in the complex is participating in a small molecule pocket). A Foldseek search is performed against this set with alignment coverage `-c 0.9` and minimum sequence identity `--min-seq-id 0.95` (see `run_foldseek_apo.sh`)
+
+Predicted structures are obtained from AFDB based on the UniProt ID associated with the pocket protein chain if available, and a fast sequence search (PentaMatch) otherwise. A similar Foldseek search is performed to filter out structures with low sequence identity and coverage. (see `run_foldseek_pred.sh`)
+
+For all apo and predicted structure hits, all protein scores, `pocket_lddt` and `pocket_fident_query` to each corresponding query pocket are calculated. Apo structures are also annotated with whether the chain has an ion or artifact. (see `score_apo_pred.py`)
+
+TODO: add orthosteric pocket annotation from AHoJ
 
 ### Columns in the dataframe
 
@@ -147,13 +160,5 @@ pocket_lddt__0.5__component	pocket_lddt__0.7__component	pocket_lddt__0.99__compo
 pocket_qcov__0.5__component	pocket_qcov__0.7__component	pocket_qcov__0.99__component	
 pocket_lddt_shared__0.5__component	pocket_lddt_shared__0.7__component	pocket_lddt_shared__0.99__component	
 
-plip_weighted_jaccard_nothreeletter__0.25__component	plip_weighted_jaccard_nothreeletter__0.5__component	plip_weighted_jaccard_nothreeletter__0.7__component	plip_weighted_jaccard_nothreeletter__0.99__component
-plip_weighted_jaccard_nothreeletterhydrophobic__0.25__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.5__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.7__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.99__component
-plip_weighted_jaccard_nowater__0.25__component	plip_weighted_jaccard_nowater__0.5__component	plip_weighted_jaccard_nowater__0.7__component	plip_weighted_jaccard_nowater__0.99__component
-plip_weighted_jaccard__0.25__component	plip_weighted_jaccard__0.5__component	plip_weighted_jaccard__0.7__component	plip_weighted_jaccard__0.99__component
 
-plip_jaccard_nothreeletter__0.25__component	plip_jaccard_nothreeletter__0.5__component	plip_jaccard_nothreeletter__0.7__component	plip_jaccard_nothreeletter__0.99__component	
-plip_jaccard_nothreeletterhydrophobic__0.25__component	plip_jaccard_nothreeletterhydrophobic__0.5__component	plip_jaccard_nothreeletterhydrophobic__0.7__component	plip_jaccard_nothreeletterhydrophobic__0.99__component
-plip_jaccard_nowater__0.25__component	plip_jaccard_nowater__0.5__component	plip_jaccard_nowater__0.7__component	plip_jaccard_nowater__0.99__component	
-plip_jaccard__0.25__component	plip_jaccard__0.5__component	plip_jaccard__0.7__component	plip_jaccard__0.99__component	
 ```
