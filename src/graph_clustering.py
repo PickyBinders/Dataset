@@ -63,18 +63,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--score_name", type=str, required=True)
     parser.add_argument("--score_dir", type=Path, required=True)
+    parser.add_argument("--type", type=str, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--thresholds", type=float, nargs="+", default=[0.5, 0.7, 0.99])
     args = parser.parse_args()
     score_dir = Path(args.score_dir)
     score_files = list(score_dir.iterdir())
-    key_to_components = label_protein_pocket_clusters(score_files, args.score_name, args.thresholds)
-    with open(args.output_dir / f"{args.score_name}__strong.json", "w") as f:
-        json.dump(key_to_components, f)
-    key_to_components = label_protein_pocket_clusters(score_files, args.score_name, args.thresholds, strong=False)
-    with open(args.output_dir / f"{args.score_name}__weak.json", "w") as f:
-        json.dump(key_to_components, f)
+    if args.type == "strong":
+        key_to_components = label_protein_pocket_clusters(score_files, args.score_name, args.thresholds)
+        with open(args.output_dir / f"{args.score_name}__strong.json", "w") as f:
+            json.dump(key_to_components, f)
+    else:
+        key_to_components = label_protein_pocket_clusters(score_files, args.score_name, args.thresholds, strong=False)
+        with open(args.output_dir / f"{args.score_name}__weak.json", "w") as f:
+            json.dump(key_to_components, f)
 
 if __name__ == "__main__":
     main()

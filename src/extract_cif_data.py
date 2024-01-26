@@ -13,7 +13,7 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
     Key for the returned dictionary is the PDB ID, biounit and ligand MMCIF chain.
     """
     cifs_dir = Path(cif_dir)
-    data = dict(dates=dict(), pockets=dict(), uniprot_ids=dict())
+    data = dict(dates=dict(), pockets=dict(), uniprot_ids=dict(), chain_mapping=dict())
     for cif_file in tqdm(cifs_dir.iterdir()):
         try:
             plc, info = io.LoadMMCIF(str(cif_file), info=True)
@@ -25,6 +25,8 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
             continue
         data["dates"][entry_id] = info.revisions.GetDateOriginal()
         author_chain_mapping = {chain.GetStringProp("pdb_auth_chain_name"): chain.name for chain in plc.chains if chain.type == mol.CHAINTYPE_POLY_PEPTIDE_L}
+        if len(author_chain_mapping):
+            data["chain_mapping"][entry_id] = author_chain_mapping
         for struct_ref in info.struct_refs:
             if struct_ref.db_name == "UNP":
                 for aligned_seq in struct_ref.aligned_seqs:

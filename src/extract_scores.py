@@ -1,6 +1,6 @@
 from tqdm import tqdm
 from pathlib import Path
-from collections import defaultdict
+from collections import Counter, defaultdict
 import numpy as np
 from dataclasses import dataclass
 import typing as ty
@@ -39,7 +39,7 @@ def make_subset_files(df, folder, name):
             num_chains += len(chains)
     print(f"Number of chains: {num_chains}")
 
-def load_alignments(aln_file):
+def load_alignments(aln_file, chain_mapping):
     data = defaultdict(dict)
     with open(aln_file) as f:
         for i, line in tqdm(enumerate(f)):
@@ -51,21 +51,27 @@ def load_alignments(aln_file):
             q_chain, t_chain = parts["query"].split('_')[1], parts["target"].split('_')[1]
             if t_entry not in data[q_entry]:
                 data[q_entry][t_entry] = defaultdict(dict)
-            data[q_entry][t_entry][q_chain][t_chain] = parts
+            if q_chain not in chain_mapping.get(q_entry, set()) or t_chain not in chain_mapping.get(t_entry, set()):
+                continue
+            q_chain_mapped = chain_mapping[q_entry][q_chain]
+            t_chain_mapped = chain_mapping[t_entry][t_chain]
+            data[q_entry][t_entry][q_chain_mapped][t_chain_mapped] = parts
     return data
 
 @dataclass
 class PLCScorer:
     entry_to_pockets: ty.Dict[str, ty.List[str]]
-    pocket_to_hash: ty.Dict[str, ty.Dict[str, ty.Dict[str, ty.Dict[int, ty.DefaultDict[str, int]]]]]
+    pocket_to_hash: ty.Dict[str, ty.Dict[str, ty.Dict[str, ty.Dict[int, ty.Counter[str]]]]]
     pocket_residues: ty.Dict[str, ty.DefaultDict[str, ty.Dict[int, int]]]
     protein_chain_lengths: ty.Dict[str, ty.Dict[str, int]]
+    chain_mapping: ty.Dict[str, ty.Dict[str, str]]
 
     @classmethod
     def initialise(cls, df_file, cif_data_dir):
-        cif_data = load_cif_data(cif_data_dir)
+        cif_data = load_cif_data(cif_data_dir, names_to_load=["pockets", "chain_mapping"])
         df = read_df(df_file)
-        single_pocket_ids = set(df["single_pocket_ID"])
+        single_pocket_ids = set(df["single_pocket_ID"]).intersection(cif_data["pockets"].keys())
+        print(len(single_pocket_ids))
         pocket_residues = {}
         pocket_to_hash = {plip_suffix: {} for plip_suffix in PLIP_SUFFIXES}
         for single_pocket_id, pocket in tqdm(cif_data["pockets"].items()):
@@ -78,6 +84,8 @@ class PLCScorer:
                 pocket_residues[single_pocket_id][residue['chain']][residue['residue_index']] = residue["residue_number"]
         entry_to_pockets = df.groupby("PDB_ID").apply(lambda x: x["pocket_ID"].unique()).to_dict()
         for single_pocket_id, plip_hashes in tqdm(zip(df["single_pocket_ID"], df["hash"])):
+            if single_pocket_id not in cif_data["pockets"]:
+                continue
             if str(plip_hashes) == "nan":
                 continue
             for plip_hash in plip_hashes.split(";"):
@@ -85,10 +93,10 @@ class PLCScorer:
                 for plip_suffix in PLIP_SUFFIXES:
                     res = int(plip_hash.residue)
                     if res not in pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain]:
-                        pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res] = defaultdict(int)
+                        pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res] = Counter()
                     h_string = plip_hash.to_string(plip_suffix)
                     if h_string is not None:
-                        pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res][h_string] += 1
+                        pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res] += Counter([h_string])
         protein_chain_lengths = defaultdict(dict)
         for entry, chains, chain_lengths in tqdm(zip(df["PDB_ID"], df["single_pocket_chains"], df["protein_chain_lengths"])):
             if str(chains) == "nan":
@@ -97,7 +105,7 @@ class PLCScorer:
                 if length == "nan":
                     continue
                 protein_chain_lengths[entry][chain] = int(length)
-        return cls(entry_to_pockets, pocket_to_hash, pocket_residues, protein_chain_lengths)
+        return cls(entry_to_pockets, pocket_to_hash, pocket_residues, protein_chain_lengths, cif_data["chain_mapping"])
     
     def get_protein_scores_pair(self, aln):
         scores = {
@@ -242,6 +250,8 @@ class PLCScorer:
                         pocket_scores[f"{score}_max"] = pocket_pair_scores[score] / pocket_length
                         pocket_mappings[f"{score}_max"] = [(q_single_pocket, t_single_pocket)]
                 for plip_suffix in PLIP_SUFFIXES:
+                    if pli_lengths[plip_suffix] == 0:
+                        continue
                     score = f"pli_qcov{plip_suffix}"
                     if pli_pair_scores[score] > pli_scores[f"{score}_weighted_max"]:
                         pli_scores[f"{score}_weighted_max"] = pli_pair_scores[score]
@@ -277,8 +287,9 @@ class PLCScorer:
             if score.endswith("_weighted_sum"):
                 pocket_scores[score] /= q_pocket_length
         for plip_suffix in PLIP_SUFFIXES:
-            score = f"pli_qcov{plip_suffix}"
-            pli_scores[f"{score}_weighted_sum"] /= q_pli_lengths[plip_suffix]
+            if q_pli_lengths[plip_suffix] > 0:
+                score = f"pli_qcov{plip_suffix}"
+                pli_scores[f"{score}_weighted_sum"] /= q_pli_lengths[plip_suffix]
         return pocket_mappings, pocket_scores, pli_mappings, pli_scores
     
 
@@ -340,7 +351,7 @@ class PLCScorer:
                         yield q_t_scores
     
     def write_scores(self, aln_file, score_file):
-        alignments = load_alignments(aln_file)
+        alignments = load_alignments(aln_file, self.chain_mapping)
         columns = INFO_COLUMNS
         for suffix in ["_weighted_sum", "_weighted_max", "_max"]:
             for s in SCORE_NAMES:
@@ -353,7 +364,9 @@ class PLCScorer:
                 if pdb_id not in alignments:
                     continue
                 for score_dict in self.get_scores(pdb_id, alignments[pdb_id]):
-                    f.write("\t".join([f"{score_dict.get(x, np.nan)}" if x in INFO_COLUMNS or x.endswith("_mapping") else f"{score_dict.get(x, np.nan):.3f}" for x in columns]) + "\n")
+                    values = [score_dict.get(x, np.nan) for x in columns]
+                    values = [f"{x:.3f}" if isinstance(x, float) else x for x in values]
+                    f.write("\t".join(str(x) for x in values) + "\n")
 
 
 def main():
@@ -361,14 +374,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--df_file", type=Path, required=True)
     parser.add_argument("--cif_data_dir", type=Path, required=True)
-    parser.add_argument("--aln_file", type=Path, required=True)
-    parser.add_argument("--score_file", type=Path, required=True)
+    parser.add_argument("--prefix", type=str, required=True)
+    parser.add_argument("--aln_dir", type=Path, required=True)
+    parser.add_argument("--score_dir", type=str, required=True)
     parser.add_argument("--overwrite", action="store_true")
     
     args = parser.parse_args()
-    if args.aln_file.exists() and (not args.score_file.exists() or args.overwrite):
+    score_dir = Path(args.score_dir)
+    score_dir.mkdir(exist_ok=True)
+    score_file = score_dir / f"{args.prefix}_scores.tsv"
+    aln_file = args.aln_dir / f"aln_{args.prefix}.tsv"
+    if aln_file.exists() and (not score_file.exists() or args.overwrite):
         plc = PLCScorer.initialise(args.df_file, args.cif_data_dir)
-        plc.write_scores(args.aln_file, args.score_file)
+        plc.write_scores(aln_file, score_file)
 
 
 if __name__ == "__main__":
