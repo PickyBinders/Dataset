@@ -128,6 +128,9 @@ def get_interactions_from_json(pdb_id, json_file: Path):
     if json_data["status"] == "deleted" or 'plip' not in json_data or json_data['plip'] is None:
         return [], []
     biounit = json_data["mmcif_id"]
+    # if biounit is not an integer, return (skip asymmetric units)
+    if not all(x.isdigit() for x in biounit):
+        return [], []
     # Get the mapping between the original MMCIF chains and the chains used by PLIP
     orig_pdb_mapping = {}
     orig_cif_mapping = {}
