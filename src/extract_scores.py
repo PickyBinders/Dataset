@@ -7,55 +7,41 @@ import typing as ty
 from create_dataset import read_df, load_cif_data
 from extract_plip_data import PLIPHash
 
-ALN_COLUMNS = "query,target,qlen,lddt,fident,alnlen,qstart,qend,tstart,tend,evalue,bits,qcov,tcov,qaln,taln,lddtfull".split(",")
+ALN_COLUMNS_FOLDSEEK = "query,target,qlen,lddt,fident,alnlen,qstart,qend,tstart,tend,evalue,bits,qcov,tcov,qaln,taln,lddtfull".split(",")
+ALN_COLUMNS_MMSEQS = "query,target,qlen,lddt,fident,alnlen,qstart,qend,tstart,tend,evalue,bits,qcov,tcov,qaln,taln".split(",")
+
 
 PLIP_SUFFIXES = ["", "_residue", "_nowater"]
 INFO_COLUMNS = ["query_pocket", "target_pocket", "protein_mapping", "ligand_mapping"]
-SCORE_NAMES = ["protein_lddt", "protein_lddt_qcov", "protein_qcov", "protein_fident", "pocket_lddt", "pocket_lddt_qcov", "pocket_qcov", "pocket_fident"] + [f"pli_qcov{x}" for x in PLIP_SUFFIXES]
-PROTEIN_CHAIN_MAPPER = "protein_lddt_qcov"
-LIGAND_CHAIN_MAPPER = "pocket_lddt_qcov"
+FOLDSEEK_SCORE_NAMES = [f"{x}_foldseek" for x in ["protein_lddt", "protein_lddt_qcov", "protein_qcov", "protein_fident", "pocket_lddt", "pocket_lddt_qcov", "pocket_qcov", "pocket_fident"] + [f"pli_qcov{x}" for x in PLIP_SUFFIXES]]
+MMSEQS_SCORE_NAMES = [f"{x}_mmseqs" for x in ["protein_qcov_mmseqs", "protein_fident_mmseqs", "pocket_qcov_msseqs", "pocket_fident_mmseqs"] + [f"pli_qcov{x}_mmseqs" for x in PLIP_SUFFIXES]]
+PROTEIN_CHAIN_MAPPER = "protein_lddt_qcov_foldseek"
+LIGAND_CHAIN_MAPPER = "pocket_lddt_qcov_foldseek"
 
-def make_subset_files(df, folder, name):
-    """
-    Make the subset files for Foldseek.
-    Splits PDBs into subsets based on the second two letters of the PDB ID.
-    """
-    num_chains = 0
-    folder = Path(folder)
-    subset_folder = folder / "subset_files"
-    subset_folder.mkdir(exist_ok=True)
-    with open(folder / f"{name}.txt" , "w") as f:
-        for pdb_id, rows in tqdm(df.groupby("PDB_ID")):
-            pdb_id = pdb_id.lower()
-            chains = set()
-            for _, row in rows.iterrows():
-                chains |= set(row["prox_plip_chains"])
-            for chain in chains:
-                f.write(f"{pdb_id}.cif.gz_{chain}\n")
-            prefix = pdb_id[1:3]
-            with open(subset_folder / f"{prefix}.txt", "a") as fp:
-                for chain in chains:
-                    fp.write(f"{pdb_id}.cif.gz_{chain}\n")
-            num_chains += len(chains)
-    print(f"Number of chains: {num_chains}")
-
-def load_alignments(aln_file, chain_mapping):
+def load_alignments(aln_file_foldseek, aln_file_mmseqs, chain_mapping):
     data = defaultdict(dict)
-    with open(aln_file) as f:
-        for i, line in tqdm(enumerate(f)):
-            if i == 0:
-                columns = line.strip().split()
-                continue
-            parts = dict(zip(columns, line.strip().split()))
-            q_entry, t_entry = parts["query"].split('.')[0].upper(), parts["target"].split('.')[0].upper()
-            q_chain, t_chain = parts["query"].split('_')[1], parts["target"].split('_')[1]
-            if t_entry not in data[q_entry]:
-                data[q_entry][t_entry] = defaultdict(dict)
-            if q_chain not in chain_mapping.get(q_entry, set()) or t_chain not in chain_mapping.get(t_entry, set()):
-                continue
-            q_chain_mapped = chain_mapping[q_entry][q_chain]
-            t_chain_mapped = chain_mapping[t_entry][t_chain]
-            data[q_entry][t_entry][q_chain_mapped][t_chain_mapped] = parts
+    for aln_file, source in zip([aln_file_foldseek, aln_file_mmseqs], ["foldseek", "mmseqs"]):
+        if not aln_file.exists():
+            continue
+        with open(aln_file) as f:
+            for i, line in tqdm(enumerate(f)):
+                if i == 0:
+                    columns = line.strip().split()
+                    continue
+                parts = dict(zip(columns, line.strip().split()))
+                q_entry, t_entry = parts["query"].split('.')[0].upper(), parts["target"].split('.')[0].upper()
+                q_chain, t_chain = parts["query"].split('_')[1], parts["target"].split('_')[1]
+                if q_chain not in chain_mapping.get(q_entry, set()) or t_chain not in chain_mapping.get(t_entry, set()):
+                    continue
+                q_chain_mapped = chain_mapping[q_entry][q_chain]
+                t_chain_mapped = chain_mapping[t_entry][t_chain]
+                if t_entry not in data[q_entry]:
+                    data[q_entry][t_entry] = dict()
+                if q_chain_mapped not in data[q_entry][t_entry]:
+                    data[q_entry][t_entry][q_chain_mapped] = dict()
+                if t_chain_mapped not in data[q_entry][t_entry][q_chain_mapped]:
+                    data[q_entry][t_entry][q_chain_mapped][t_chain_mapped] = dict()
+                data[q_entry][t_entry][q_chain_mapped][t_chain_mapped][source] = parts
     return data
 
 @dataclass
@@ -108,18 +94,19 @@ class PLCScorer:
         return cls(entry_to_pockets, pocket_to_hash, pocket_residues, protein_chain_lengths, cif_data["chain_mapping"])
     
     def get_protein_scores_pair(self, aln):
-        scores = {
-            "protein_lddt": float(aln["lddt"]),
-            "protein_lddt_qcov": float(aln["lddt"]) * float(aln["qcov"]),
-            "protein_qcov": float(aln["qcov"]),
-            "protein_fident": float(aln["fident"]),
-        }
+        scores = {}
+        for source in aln:
+            scores[f"protein_qcov_{source}"] = float(aln[source]["qcov"])
+            scores[f"protein_fident_{source}"] = float(aln[source]["fident"])
+            if source == "foldseek":
+                scores[f"protein_lddt_{source}"] = float(aln[source]["lddt"])
+                scores[f"protein_lddt_qcov_{source}"] = float(aln[source]["lddt"]) * float(aln[source]["qcov"])
         return scores
 
     def get_protein_scores(self, q_alignments, q_entry, q_chains, t_entry, t_chains, q_length):
         scores = {}
         mappings = {}
-        for score in SCORE_NAMES:
+        for score in FOLDSEEK_SCORE_NAMES + MMSEQS_SCORE_NAMES:
             if score.startswith("protein_"):
                 for suffix in ["_weighted_sum", "_weighted_max", "_max"]:
                     scores[score + suffix] = 0
@@ -134,7 +121,7 @@ class PLCScorer:
                 aln = q_alignments.get(t_entry, {}).get(q_chain, {}).get(t_chain, None)
                 if aln is not None:
                     pair_scores = self.get_protein_scores_pair(aln)
-                    s_matrix[i, j] = pair_scores[PROTEIN_CHAIN_MAPPER]
+                    s_matrix[i, j] = pair_scores.get(PROTEIN_CHAIN_MAPPER, 0)
                     for score in pair_scores:
                         if pair_scores[score] * q_chain_length > scores[f"{score}_weighted_max"]:
                             scores[f"{score}_weighted_max"] = pair_scores[score] * q_chain_length
@@ -174,15 +161,13 @@ class PLCScorer:
         return mappings, scores, alns
 
     def get_pocket_pli_scores_pair(self, alns, q_single_pocket, t_single_pocket):
-        pocket_scores = {
-            "pocket_lddt": 0,
-            "pocket_lddt_qcov": 0,
-            "pocket_qcov": 0,
-            "pocket_fident": 0,
-        }
+        pocket_scores = {}
         pli_scores = {}
-        for plip_suffix in PLIP_SUFFIXES:
-            pli_scores["pli_qcov" + plip_suffix] = 0
+        for score in FOLDSEEK_SCORE_NAMES + MMSEQS_SCORE_NAMES:
+            if score.startswith("pocket_"):
+                pocket_scores[score] = 0
+            if score.startswith("pli_"):
+                pli_scores[score] = 0
         q_plip = {}
         t_plip = {}
         for q_chain, t_chain in alns:
@@ -190,26 +175,32 @@ class PLCScorer:
                 q_plip[plip_suffix] = self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain]
                 t_plip[plip_suffix] = self.pocket_to_hash[plip_suffix][t_single_pocket][t_chain]
             aln = alns[(q_chain, t_chain)]
-            q_i, t_i = int(aln['qstart']), int(aln['tstart'])
-            for q_a, t_a, lddt in zip(aln['qaln'], aln['taln'], aln['lddtfull'].split(",")):
-                q_n = self.pocket_residues[q_single_pocket][q_chain].get(q_i, None)
-                if q_n is not None:
-                    if lddt != "nan":
-                        pocket_scores["pocket_lddt"] += float(lddt)
-                    t_n = self.pocket_residues[t_single_pocket][t_chain].get(t_i, None)
-                    if t_n is not None:
-                        pocket_scores["pocket_qcov"] += 1
+            for source in aln:
+                q_i, t_i = int(aln[source]['qstart']), int(aln[source]['tstart'])
+                if source == "foldseek":
+                    lddtfull = aln[source]['lddtfull'].split(",")
+                else:
+                    lddtfull = ["nan"] * len(aln[source]['qaln'])
+                for i in range(len(aln[source]['qaln'])):
+                    q_a, t_a, lddt = aln[source]['qaln'][i], aln[source]['taln'][i], lddtfull[i]
+                    q_n = self.pocket_residues[q_single_pocket][q_chain].get(q_i, None)
+                    if q_n is not None:
                         if lddt != "nan":
-                            pocket_scores["pocket_lddt_qcov"] += float(lddt)
-                        if q_a == t_a:
-                            pocket_scores["pocket_fident"] += 1
-                        for plip_suffix in PLIP_SUFFIXES:
-                            if q_n in q_plip[plip_suffix] and t_n in t_plip[plip_suffix]:
-                                pli_scores[f"pli_qcov{plip_suffix}"] += sum((q_plip[plip_suffix][q_n] & t_plip[plip_suffix][t_n]).values())
-                if t_a != "-":
-                    t_i += 1
-                if q_a != "-":
-                    q_i += 1
+                            pocket_scores[f"pocket_lddt_{source}"] += float(lddt)
+                        t_n = self.pocket_residues[t_single_pocket][t_chain].get(t_i, None)
+                        if t_n is not None:
+                            pocket_scores[f"pocket_qcov_{source}"] += 1
+                            if lddt != "nan":
+                                pocket_scores[f"pocket_lddt_qcov_{source}"] += float(lddt)
+                            if q_a == t_a:
+                                pocket_scores[f"pocket_fident_{source}"] += 1
+                            for plip_suffix in PLIP_SUFFIXES:
+                                if q_n in q_plip[plip_suffix] and t_n in t_plip[plip_suffix]:
+                                    pli_scores[f"pli_qcov{plip_suffix}_{source}"] += sum((q_plip[plip_suffix][q_n] & t_plip[plip_suffix][t_n]).values())
+                    if t_a != "-":
+                        t_i += 1
+                    if q_a != "-":
+                        q_i += 1
         return pocket_scores, pli_scores
 
     def get_pocket_pli_scores(self, alns, q_single_pockets, t_single_pockets, q_pocket_length, q_pli_lengths):
@@ -217,7 +208,7 @@ class PLCScorer:
         pli_scores = {}
         pocket_mappings = {}
         pli_mappings = {}
-        for score in SCORE_NAMES:
+        for score in FOLDSEEK_SCORE_NAMES + MMSEQS_SCORE_NAMES:
             for suffix in ["_weighted_sum", "_weighted_max", "_max"]:
                 if score.startswith("pocket_"):
                     pocket_scores[score + suffix] = 0
@@ -252,21 +243,23 @@ class PLCScorer:
                 for plip_suffix in PLIP_SUFFIXES:
                     if pli_lengths[plip_suffix] == 0:
                         continue
-                    score = f"pli_qcov{plip_suffix}"
-                    if pli_pair_scores[score] > pli_scores[f"{score}_weighted_max"]:
-                        pli_scores[f"{score}_weighted_max"] = pli_pair_scores[score]
-                        max_pli_lengths[f"{score}_weighted_max"] = pli_lengths[plip_suffix]
-                        pli_mappings[f"{score}_weighted_max"] = [(q_single_pocket, t_single_pocket)]
-                    if pli_pair_scores[score] / pli_lengths[plip_suffix] > pli_scores[f"{score}_max"]:
-                        pli_scores[f"{score}_max"] = pli_pair_scores[score] / pli_lengths[plip_suffix]
-                        pli_mappings[f"{score}_max"] = [(q_single_pocket, t_single_pocket)]
+                    for source in ["foldseek", "mmseqs"]:
+                        score = f"pli_qcov{plip_suffix}_{source}"
+                        if pli_pair_scores[score] > pli_scores[f"{score}_weighted_max"]:
+                            pli_scores[f"{score}_weighted_max"] = pli_pair_scores[score]
+                            max_pli_lengths[f"{score}_weighted_max"] = pli_lengths[plip_suffix]
+                            pli_mappings[f"{score}_weighted_max"] = [(q_single_pocket, t_single_pocket)]
+                        if pli_pair_scores[score] / pli_lengths[plip_suffix] > pli_scores[f"{score}_max"]:
+                            pli_scores[f"{score}_max"] = pli_pair_scores[score] / pli_lengths[plip_suffix]
+                            pli_mappings[f"{score}_max"] = [(q_single_pocket, t_single_pocket)]
         for score in pocket_scores:
             if score.endswith("_weighted_max") and max_pocket_lengths[score] > 0:
                 pocket_scores[score] /= max_pocket_lengths[score]
         for plip_suffix in PLIP_SUFFIXES:
-            score = f"pli_qcov{plip_suffix}_weighted_max"
-            if max_pli_lengths[score] > 0:
-                pli_scores[score] /= max_pli_lengths[score]
+            for source in ["foldseek", "mmseqs"]:
+                score = f"pli_qcov{plip_suffix}_{source}_weighted_max"
+                if max_pli_lengths[score] > 0:
+                    pli_scores[score] /= max_pli_lengths[score]
 
         while np.any(s_matrix):
             score = np.amax(s_matrix)
@@ -287,9 +280,9 @@ class PLCScorer:
             if score.endswith("_weighted_sum"):
                 pocket_scores[score] /= q_pocket_length
         for plip_suffix in PLIP_SUFFIXES:
-            if q_pli_lengths[plip_suffix] > 0:
-                score = f"pli_qcov{plip_suffix}"
-                pli_scores[f"{score}_weighted_sum"] /= q_pli_lengths[plip_suffix]
+            for source in ["foldseek", "mmseqs"]:
+                if q_pli_lengths[plip_suffix] > 0:
+                    pli_scores[f"pli_qcov{plip_suffix}_{source}_weighted_sum"] /= q_pli_lengths[plip_suffix]
         return pocket_mappings, pocket_scores, pli_mappings, pli_scores
     
 
@@ -350,11 +343,11 @@ class PLCScorer:
                         q_t_scores["query_pocket"] = q_pocket
                         yield q_t_scores
     
-    def write_scores(self, aln_file, score_file):
-        alignments = load_alignments(aln_file, self.chain_mapping)
+    def write_scores(self, aln_file_foldseek, aln_file_mmseqs, score_file):
+        alignments = load_alignments(aln_file_foldseek, aln_file_mmseqs, self.chain_mapping)
         columns = INFO_COLUMNS
         for suffix in ["_weighted_sum", "_weighted_max", "_max"]:
-            for s in SCORE_NAMES:
+            for s in FOLDSEEK_SCORE_NAMES + MMSEQS_SCORE_NAMES:
                 columns.append(f"{s}{suffix}")
                 if suffix != "_weighted_sum":
                     columns.append(f"{s}{suffix}_mapping")
@@ -374,19 +367,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--df_file", type=Path, required=True)
     parser.add_argument("--cif_data_dir", type=Path, required=True)
-    parser.add_argument("--prefix", type=str, required=True)
-    parser.add_argument("--aln_dir", type=Path, required=True)
-    parser.add_argument("--score_dir", type=str, required=True)
+    parser.add_argument("--aln_file_foldseek", type=Path, required=True)
+    parser.add_argument("--aln_file_mmseqs", type=Path, required=True)
+    parser.add_argument("--score_file", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
     
     args = parser.parse_args()
-    score_dir = Path(args.score_dir)
-    score_dir.mkdir(exist_ok=True)
-    score_file = score_dir / f"{args.prefix}_scores.tsv"
-    aln_file = args.aln_dir / f"aln_{args.prefix}.tsv"
-    if aln_file.exists() and (not score_file.exists() or args.overwrite):
-        plc = PLCScorer.initialise(args.df_file, args.cif_data_dir)
-        plc.write_scores(aln_file, score_file)
+    if not args.score_file.exists() or args.overwrite:
+        with open(args.score_file, "w") as f:
+            f.write("")
+        if args.aln_file_foldseek.exists() or args.aln_file_mmseqs.exists():
+            plc = PLCScorer.initialise(args.df_file, args.cif_data_dir)
+            plc.write_scores(args.aln_file_foldseek, args.aln_file_mmseqs, args.score_file)
 
 
 if __name__ == "__main__":

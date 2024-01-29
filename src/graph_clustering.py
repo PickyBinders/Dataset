@@ -32,7 +32,7 @@ def label_protein_pocket_clusters(score_files, score_name, thresholds, strong=Tr
     for score_file in tqdm(score_files):
         with open(score_file) as f:
             for i, line in enumerate(f):
-                if i == 0:
+                if i == 0 or not len(line):
                     continue
                 parts = line.strip().split("\t")
                 parts = dict(zip(columns, parts))
