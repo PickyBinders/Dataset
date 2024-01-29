@@ -14,7 +14,7 @@ ALN_COLUMNS_MMSEQS = "query,target,qlen,lddt,fident,alnlen,qstart,qend,tstart,te
 PLIP_SUFFIXES = ["", "_residue", "_nowater"]
 INFO_COLUMNS = ["query_pocket", "target_pocket", "protein_mapping", "ligand_mapping"]
 FOLDSEEK_SCORE_NAMES = [f"{x}_foldseek" for x in ["protein_lddt", "protein_lddt_qcov", "protein_qcov", "protein_fident", "pocket_lddt", "pocket_lddt_qcov", "pocket_qcov", "pocket_fident"] + [f"pli_qcov{x}" for x in PLIP_SUFFIXES]]
-MMSEQS_SCORE_NAMES = [f"{x}_mmseqs" for x in ["protein_qcov_mmseqs", "protein_fident_mmseqs", "pocket_qcov_msseqs", "pocket_fident_mmseqs"] + [f"pli_qcov{x}_mmseqs" for x in PLIP_SUFFIXES]]
+MMSEQS_SCORE_NAMES = [f"{x}_mmseqs" for x in ["protein_qcov", "protein_fident", "pocket_qcov", "pocket_fident"] + [f"pli_qcov{x}" for x in PLIP_SUFFIXES]]
 PROTEIN_CHAIN_MAPPER = "protein_lddt_qcov_foldseek"
 LIGAND_CHAIN_MAPPER = "pocket_lddt_qcov_foldseek"
 
