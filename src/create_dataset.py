@@ -164,13 +164,13 @@ def label_ligand_types(df, parsed_components, cofactor_file):
 
 def load_cif_data(cif_data_dir, names_to_load=None):
     if names_to_load is None:
-        names_to_load = ["dates", "pockets", "uniprot_ids"]
+        names_to_load = ["dates", "pockets", "uniprot_ids", "chain_mapping", "lengths", "entity_mapping"]
     cif_data = {x: dict() for x in names_to_load}
     for cif_data_file in tqdm(Path(cif_data_dir).iterdir()):
         with open(cif_data_file) as f:
             d = json.load(f)
             for x in names_to_load:
-                cif_data[x].update(d[x])
+                cif_data[x].update(d.get(x,{}))
     return cif_data
 
 def get_uniprot_to_chains(chain_to_uniprots):
@@ -195,6 +195,10 @@ def annotate_chains_and_residues(df, cif_data_dir):
     df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [len(uniprot_to_chains.get(y, [])) for y in x] if str(x) != "nan" else np.nan)
     df["date"] = df["PDB_ID"].apply(lambda x: cif_data["dates"].get(x.upper(), np.nan))
     df["year"] = df["date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
+    df["single_pocket_chains"] = df.apply(lambda row: "_".join(sorted(row["prox_plip_chains"])) if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+    df["protein_chain_lengths"] = df.apply(lambda row: [cif_data["lengths"][row["PDB_ID"]].get(y, np.nan) for y in row["single_pocket_chains"].split("_")] if row["PDB_ID"] in cif_data["lengths"] and str(row["single_pocket_chains"]) != "nan" else np.nan, axis=1)
+    df["protein_entity_ids"] = df.apply(lambda row: [cif_data["entity_mapping"][row["PDB_ID"]].get(y, np.nan) for y in row["single_pocket_chains"].split("_")] if row["PDB_ID"] in cif_data["entity_mapping"] and str(row["single_pocket_chains"]) != "nan" else np.nan, axis=1)
+    df["ligand_entity_id"] = df.apply(lambda row: cif_data["entity_mapping"][row["PDB_ID"]].get(row["ligand_mmcif_chain"], np.nan) if row["PDB_ID"] in cif_data["entity_mapping"] else np.nan, axis=1)
     return df
 
 
@@ -240,40 +244,74 @@ def assign_pocket(df):
     df["num_chains_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][1])
     return df
 
-def get_smtl_info(pdb_id, biounit, smtl_dir):
+def get_smtl_info(pdb_id, smtl_dir):
+    #TODO: get these from cif_data instead
     smtl_dir = Path(smtl_dir)
     pdb_id = pdb_id.lower()
-    annotation_file = smtl_dir / pdb_id[:2] / pdb_id[2:] / f"annotation.{biounit}.json"
-    if not annotation_file.exists():
-        return dict(pdb_id=pdb_id.upper(), biounit=biounit)
-    with open(annotation_file) as f:
-        annotation = json.load(f)
-    lengths = {}
-    for x in annotation['entities']:
-        if "seqres" in x:
-            for c in x['chains']:
-                if c['orig_pdb_name'] is not None:
-                    lengths[c['orig_cif_name']] = len(x["seqres"])
-    return dict(pdb_id=pdb_id.upper(), biounit=biounit, lengths=lengths, method=annotation["method"],
-                resolution=annotation["resolution"],oligo_state=annotation["oligo_state"],transmembrane=annotation.get("membrane", {}).get("is_transmem", None))
+    data = []
+    for annotation_file in (smtl_dir / pdb_id[:2] / pdb_id[2:]).glob("annotation.*.json"):
+        with open(annotation_file) as f:
+            annotation = json.load(f)
+        if annotation["status"] == "deleted":
+            continue
+        if not all(x.isdigit() for x in annotation["mmcif_id"]):
+            continue
+        data.append(dict(pdb_id=pdb_id.upper(), biounit=int(annotation["mmcif_id"]), 
+                         method=annotation["method"],
+                    resolution=annotation["resolution"], oligo_state=annotation["oligo_state"],
+                    transmembrane=annotation.get("membrane", {}).get("is_transmem", None)))
+    return data
 
 
 def label_smtl(df, smtl_dir, num_threads=20):
     annotations = {}
-    input_args = [(row["PDB_ID"], int(row["biounit"]), smtl_dir) for _, row in df[["PDB_ID", "biounit"]].drop_duplicates().iterrows()]
+    input_args = [(pdb_id, smtl_dir) for pdb_id in df["PDB_ID"].unique()]
     with Pool(num_threads) as p:
-        for annotation in p.starmap(get_smtl_info, input_args):
-            annotations[(annotation["pdb_id"], annotation["biounit"])] = annotation
+        for annotation_list in p.starmap(get_smtl_info, input_args):
+            for annotation in annotation_list:
+                annotations[(annotation["pdb_id"], annotation["biounit"])] = annotation
     for a in ["method", "oligo_state", "transmembrane", "resolution"]:
         df[a] = df.apply(lambda row: annotations.get((row["PDB_ID"], int(row["biounit"])), {}).get(a, np.nan), axis=1)
-    df["single_pocket_chains"] = df.apply(lambda row: "_".join(sorted(row["prox_plip_chains"])) if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
-    df["protein_chain_lengths"] = df.apply(lambda row: [annotations[(row["PDB_ID"], int(row["biounit"]))]["lengths"].get(y, np.nan) for y in row["single_pocket_chains"].split("_")] if (row["PDB_ID"], int(row["biounit"])) in annotations and str(row["single_pocket_chains"]) != "nan" else np.nan, axis=1)
     return df
 
-def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
-                         smtl_dir, num_threads=20, overwrite=False):
+def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
+    """
+    Make the subset files for Foldseek and mmseqs.
+    Splits PDBs into subsets based on the second two letters of the PDB ID.
+    """
+    folders = [foldseek_folder, mmseqs_folder]
+    sources = ["foldseek", "mmseqs"]
+    for source, folder in zip(sources, folders):
+        folder = Path(folder)
+        folder.mkdir(exist_ok=True)
+        subset_folder = folder / "subset_files"
+        subset_folder.mkdir(exist_ok=True)
+        with open(folder / f"{name}.txt" , "w") as f:
+            for pdb_id, rows in tqdm(df.groupby("PDB_ID")):
+                asym_auth_chain_mapping = {v: k for k, v in chain_mapping.get(pdb_id, {}).items()}
+                pdb_id = pdb_id.lower()
+                chains = set()
+                for _, row in rows.iterrows():
+                    chains |= set(row["prox_plip_chains"])
+                auth_chains = set(asym_auth_chain_mapping[x] for x in chains if x in asym_auth_chain_mapping)
+                for chain in auth_chains:
+                    if source == "foldseek":
+                        f.write(f"{pdb_id}.cif.gz_{chain}\n")
+                    else:
+                        f.write(f"{pdb_id}_{chain}\n")
+                prefix = pdb_id[1:3]
+                with open(subset_folder / f"{prefix}.txt", "a") as fp:
+                    for chain in auth_chains:
+                        if source == "foldseek":
+                            fp.write(f"{pdb_id}.cif.gz_{chain}\n")
+                        else:
+                            fp.write(f"{pdb_id}_{chain}\n")
+
+def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
+                         smtl_dir, ignore_file = None, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
     """
     dataset_dir: directory to save the dataset files
+    foldseek_dir: directory to save the Foldseek files
     plip_file: file with PLIP results
     validation_file: file with validation results
     cif_data_dir: directory with cif_data files (split by first two characters of PDB ID)
@@ -281,12 +319,16 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, 
     cofactor_file: file with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)
     artifact_file: file with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)
     smtl_dir: directory with SMTL files
+    cif_dir: directory with divided PDB MMCIF files
+    max_protein_chains: maximum number of protein chains to consider
+    max_ligand_chains: maximum number of ligand chains to consider
     num_threads: number of threads to use
     overwrite: whether to overwrite existing files
     """
     dataset_dir = Path(dataset_dir)
     dataset_dir.mkdir(exist_ok=True)
     all_pockets_file = dataset_dir / "all_pockets.csv"
+    
     if overwrite or not all_pockets_file.exists():
         plip_df = read_df(plip_file)
         print("Number of PLIP pockets:", len(plip_df))
@@ -298,11 +340,15 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, 
                     how='outer')
         df["biounit"] = df["biounit"].fillna(1)
         df["single_pocket_ID"] = df.apply(lambda row: f'{row["PDB_ID"]}__{int(row["biounit"])}__{row["ligand_mmcif_chain"]}', axis=1)
+        print("Annotation of chains and residues")
         df = annotate_chains_and_residues(df, cif_data_dir)
         RDLogger.DisableLog('rdApp.*')
         parsed_components = ccd_reader.read_pdb_components_file(str(components_file))
+        print("Labeling ligand types")
         df = label_ligand_types(df, parsed_components, cofactor_file)
+        print("Labeling artifacts")
         df = label_artifacts(df, artifact_file)
+        print("Annotating info from SMTL")
         df = label_smtl(df, smtl_dir, num_threads=num_threads)
         df["has_plip"] = df["plip_pocket_ID"].notna()
         df["has_validation"] = df["validation_pocket_ID"].notna()
@@ -326,11 +372,18 @@ def create_dataset_files(dataset_dir, plip_file, validation_file, cif_data_dir, 
     df = df[df["Pocket_Number"].isin(sm_pockets)]
     print("Number of pockets with small molecules (no artifacts):", df["Pocket_Number"].nunique())
     df.to_csv(dataset_dir / "small_molecule_pockets_no_artifacts.csv", index=False)
+    df = df[(df["num_chains_in_pocket"] <= max_protein_chains) & (df["num_ligands_in_pocket"] <= max_ligand_chains)]
+    print("Number of pockets with small molecules (no artifacts, max protein chains, max ligand chains):", df["Pocket_Number"].nunique())
+    df.to_csv(dataset_dir / "filtered_pockets.csv", index=False)
+    chain_mapping = load_cif_data(cif_data_dir, names_to_load=["chain_mapping"])["chain_mapping"]
+    make_subset_files(df, Path(foldseek_dir) / "filtered_pockets", Path(mmseqs_dir) / "filtered_pockets", chain_mapping, "filtered_pockets")
 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset_dir", type=str, help="Directory to save the dataset files")
+    parser.add_argument("foldseek_dir", type=str, help="Directory to save the Foldseek files")
+    parser.add_argument("mmseqs_dir", type=str, help="Directory to save the MMSEQS files")
     parser.add_argument("plip_file", type=str, help="File with PLIP results")
     parser.add_argument("validation_file", type=str, help="File with validation results")
     parser.add_argument("cif_data_dir", type=str, help="Directory with cif_data files")
@@ -339,6 +392,8 @@ def main():
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
     parser.add_argument("smtl_dir", type=str, help="Directory with SMTL files")
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
+    parser.add_argument("--max_protein_chains", type=int, default=10, help="Maximum number of protein chains to consider")
+    parser.add_argument("--max_ligand_chains", type=int, default=5, help="Maximum number of ligand chains to consider")
     parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
     args = parser.parse_args()
