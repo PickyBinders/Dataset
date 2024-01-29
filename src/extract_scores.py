@@ -29,8 +29,8 @@ def load_alignments(aln_file_foldseek, aln_file_mmseqs, chain_mapping):
                     columns = line.strip().split()
                     continue
                 parts = dict(zip(columns, line.strip().split()))
-                q_entry, t_entry = parts["query"].split('.')[0].upper(), parts["target"].split('.')[0].upper()
-                q_chain, t_chain = parts["query"].split('_')[1], parts["target"].split('_')[1]
+                q_entry, t_entry = parts["query"].replace('.cif.gz', '').split("_")[0].upper(), parts["target"].replace('.cif.gz', '').split("_")[0].upper()
+                q_chain, t_chain = parts["query"].replace('.cif.gz', '').split('_')[1], parts["target"].replace('.cif.gz', '').split('_')[1]
                 if q_chain not in chain_mapping.get(q_entry, set()) or t_chain not in chain_mapping.get(t_entry, set()):
                     continue
                 q_chain_mapped = chain_mapping[q_entry][q_chain]
