@@ -13,10 +13,11 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
     Key for the returned dictionary is the PDB ID, biounit and ligand MMCIF chain.
     """
     cifs_dir = Path(cif_dir)
-    data = dict(dates=dict(), pockets=dict(), uniprot_ids=dict(), chain_mapping=dict())
+    data = dict(dates=dict(), pockets=dict(), uniprot_ids=dict(), 
+                chain_mapping=dict(), lengths=dict(), entity_mapping=dict())
     for cif_file in tqdm(cifs_dir.iterdir()):
         try:
-            plc, info = io.LoadMMCIF(str(cif_file), info=True)
+            plc, seqres, info = io.LoadMMCIF(str(cif_file), info=True, seqres=True)
         except Exception as e:
             logging.error(f"PDBError: Could not load {cif_file}: {e}")
             continue
@@ -24,9 +25,11 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
         if entry_id in ignore:
             continue
         data["dates"][entry_id] = info.revisions.GetDateOriginal()
+        data["lengths"][entry_id] = {x.name: len(x.string) for x in seqres}
         author_chain_mapping = {chain.GetStringProp("pdb_auth_chain_name"): chain.name for chain in plc.chains if chain.type == mol.CHAINTYPE_POLY_PEPTIDE_L}
         if len(author_chain_mapping):
             data["chain_mapping"][entry_id] = author_chain_mapping
+        data["entity_mapping"][entry_id] = {c.GetName(): info.GetMMCifEntityIdTr(c.GetName()) for c in plc.chains}
         for struct_ref in info.struct_refs:
             if struct_ref.db_name == "UNP":
                 for aligned_seq in struct_ref.aligned_seqs:
