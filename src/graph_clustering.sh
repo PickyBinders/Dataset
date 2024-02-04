@@ -1,7 +1,8 @@
 score_dir=$1
 output_dir=$2
-FOLDSEEK_SCORE_NAMES=( "protein_lddt" "protein_lddt_qcov" "protein_qcov" "protein_fident" "pocket_lddt" "pocket_lddt_qcov" "pocket_qcov" "pocket_fident" "pli_qcov" "pli_qcov_residue" "pli_qcov_nowater" )
-MMSEQS_SCORE_NAMES=("protein_qcov" "protein_fident" "pocket_qcov" "pocket_fident" "pli_qcov" "pli_qcov_residue" "pli_qcov_nowater" )
+
+FOLDSEEK_SCORE_NAMES=( "protein_lddt" "protein_lddt_qcov" "protein_qcov" "protein_fident" "protein_fident_qcov" "pocket_lddt" "pocket_lddt_qcov" "pocket_qcov" "pocket_fident" "pocket_fident_qcov" "pli_qcov" "pli_qcov_residue" "pli_qcov_nowater" )
+MMSEQS_SCORE_NAMES=("protein_qcov" "protein_fident" "protein_fident_qcov" "pocket_qcov" "pocket_fident" "pocket_fident_qcov" "pli_qcov" "pli_qcov_residue" "pli_qcov_nowater" )
 
 suffixes=( "_weighted_sum" "_weighted_max" "_max" )
 types=( "strong" "weak" )
@@ -33,7 +34,7 @@ cat << EOF | sbatch
 #SBATCH --job-name=graph_clustering
 #SBATCH --qos=6hours
 #SBATCH --output="$log_dir"/%a.out
-#SBATCH --mem=128G
+#SBATCH --mem=384G
 #SBATCH --array=1-"$num_commands"
 
 \$(head -\$SLURM_ARRAY_TASK_ID $CMD_FILE | tail -1)
