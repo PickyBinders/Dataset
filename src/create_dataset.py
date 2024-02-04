@@ -262,6 +262,31 @@ def get_smtl_info(pdb_id, smtl_dir):
                     transmembrane=annotation.get("membrane", {}).get("is_transmem", None)))
     return data
 
+def get_covalent_info(pdb_id, pdb_dir):
+    from mmcif.io.PdbxReader import PdbxReader
+    import gzip
+    cif_file = Path(pdb_dir) / pdb_id[1:3].lower() / f"{pdb_id.lower()}.cif.gz"
+    if not cif_file.exists():
+        return None
+    with gzip.open(str(cif_file), 'rt', encoding='utf-8') as f:
+        data = []
+        try:
+            prd = PdbxReader(f)
+            prd.read(data)
+        except Exception as e:
+            print(f"Error reading {cif_file}: {e}")
+            return None
+    struct_conn = data[0].getObj('struct_conn')
+    if struct_conn is None:
+        return None
+    covalent_bonds = [index for index in range(struct_conn.getRowCount()) if struct_conn.getValue('conn_type_id', index) == 'covale']
+    if len(covalent_bonds) == 0:
+        return None
+    covalent_ligand_chains = set()
+    for index in covalent_bonds:
+        covalent_ligand_chains.add(struct_conn.getValue('ptnr1_label_asym_id', index))
+        covalent_ligand_chains.add(struct_conn.getValue('ptnr2_label_asym_id', index))
+    return {pdb_id: covalent_ligand_chains}
 
 def label_smtl(df, smtl_dir, num_threads=20):
     annotations = {}
@@ -286,6 +311,7 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
         folder.mkdir(exist_ok=True)
         subset_folder = folder / "subset_files"
         subset_folder.mkdir(exist_ok=True)
+        first_time = set()
         with open(folder / f"{name}.txt" , "w") as f:
             for pdb_id, rows in tqdm(df.groupby("PDB_ID")):
                 asym_auth_chain_mapping = {v: k for k, v in chain_mapping.get(pdb_id, {}).items()}
@@ -300,7 +326,12 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
                     else:
                         f.write(f"{pdb_id}_{chain}\n")
                 prefix = pdb_id[1:3]
-                with open(subset_folder / f"{prefix}.txt", "a") as fp:
+                if prefix not in first_time:
+                    first_time.add(prefix)
+                    open_mode = "w"
+                else:
+                    open_mode = "a"
+                with open(subset_folder / f"{prefix}.txt", open_mode) as fp:
                     for chain in auth_chains:
                         if source == "foldseek":
                             fp.write(f"{pdb_id}.cif.gz_{chain}\n")
@@ -308,10 +339,11 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
                             fp.write(f"{pdb_id}_{chain}\n")
 
 def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
-                         smtl_dir, ignore_file = None, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
+                         smtl_dir, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
     """
     dataset_dir: directory to save the dataset files
     foldseek_dir: directory to save the Foldseek files
+    mmseqs_dir: directory to save the MMSEQS files
     plip_file: file with PLIP results
     validation_file: file with validation results
     cif_data_dir: directory with cif_data files (split by first two characters of PDB ID)
@@ -319,7 +351,6 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     cofactor_file: file with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)
     artifact_file: file with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)
     smtl_dir: directory with SMTL files
-    cif_dir: directory with divided PDB MMCIF files
     max_protein_chains: maximum number of protein chains to consider
     max_ligand_chains: maximum number of ligand chains to consider
     num_threads: number of threads to use
@@ -331,6 +362,7 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     
     if overwrite or not all_pockets_file.exists():
         plip_df = read_df(plip_file)
+        plip_df = plip_df[(~plip_df["biounit"].str.startswith("ASU")) & (~plip_df["biounit"].str.startswith("PAU")) & (~plip_df["biounit"].str.startswith("XAU"))].reset_index(drop=True)
         print("Number of PLIP pockets:", len(plip_df))
         df = read_df(validation_file, columns=VALIDATION_COLUMNS)
         print("Number of validation pockets:", len(df))

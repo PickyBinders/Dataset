@@ -1,7 +1,6 @@
 import networkx as nx
 from tqdm import tqdm
 from pathlib import Path
-import extract_scores
 import numpy as np
 import json
 
@@ -23,16 +22,13 @@ def label_protein_pocket_clusters(score_files, score_name, thresholds, strong=Tr
         graph = nx.DiGraph()
     else:
         graph = nx.Graph()
-    columns = extract_scores.INFO_COLUMNS
-    for suffix in ["_weighted_sum", "_weighted_max", "_max"]:
-        for s in extract_scores.SCORE_NAMES:
-            columns.append(f"{s}{suffix}")
-            if suffix != "_weighted_sum":
-                columns.append(f"{s}{suffix}_mapping")
     for score_file in tqdm(score_files):
         with open(score_file) as f:
             for i, line in enumerate(f):
-                if i == 0 or not len(line):
+                if not len(line):
+                    continue
+                if i == 0:
+                    columns = line.strip().split("\t")
                     continue
                 parts = line.strip().split("\t")
                 parts = dict(zip(columns, parts))
@@ -54,6 +50,7 @@ def label_df(pocket_df, cluster_dir):
         for key in key_to_component:
             col = f"{score_name}__{key}__{strong}__component"
             pocket_df[col] = pocket_df["pocket_ID"].apply(lambda x: key_to_component[key].get(x, None))
+            pocket_df[f"{col}__not_found"] = pocket_df[col].apply(lambda x: x is None)
             max_component = int(pocket_df[col].max()) + 1
             pocket_df.loc[pocket_df[col].isnull(), col] = [int(max_component) + i for i in range(len(pocket_df[pocket_df[col].isnull()]))]
     return pocket_df
@@ -66,7 +63,7 @@ def main():
     parser.add_argument("--type", type=str, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--thresholds", type=float, nargs="+", default=[0.5, 0.7, 0.99])
+    parser.add_argument("--thresholds", type=float, nargs="+", default=[0.3, 0.5, 0.7, 0.99])
     args = parser.parse_args()
     score_dir = Path(args.score_dir)
     score_files = list(score_dir.iterdir())
