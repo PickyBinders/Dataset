@@ -1,5 +1,5 @@
 import json
-from ost import mol, io
+from ost import conop, mol, io
 from pathlib import Path
 from tqdm import tqdm
 import logging
@@ -53,7 +53,7 @@ def load_biounit_seqres(cif_file, biounit_id):
     except Exception as e:
         logging.error(f"Could not create biounit for {cif_file}: {e}")
         return None, None
-    return biounit, seqres
+    return biounit, seqres, info
 
 def save_ligands(ent, ligand_chains, output_prefix):
     for ligand_chain in ligand_chains:
@@ -79,9 +79,31 @@ def save_pdb_file(ent_renamed, output_pdb_file, name_mapping, output_mapping_fil
     except Exception as e:
         logging.error(f"Could not save {output_pdb_file}: {e}")
 
-def save_cif_file(ent, output_cif_file):
+def save_cif_file(ent, output_cif_file, info, pocket_name):
     try:
-        io.SaveMMCIF(ent, str(output_cif_file))
+        lib = conop.GetDefaultLib()
+        entity_info = io.MMCifWriterEntityList()
+        entity_ids = set(info.GetMMCifEntityIdTr(ch.name.split(".")[-1]) for ch in ent.chains)
+        for entity_id in info.GetEntityIdsOfType("polymer"):
+            if entity_id not in entity_ids:
+                continue
+            # Get entity description from info object
+            entity_desc = info.GetEntityDesc(entity_id)
+            # interface of entity_desc is similar to MMCifWriterEntity
+            entity_poly_type = entity_desc.entity_poly_type
+            mon_ids = entity_desc.mon_ids
+            e = io.MMCifWriterEntity.FromPolymer(entity_poly_type, mon_ids, lib)
+            entity_info.append(e)
+            # search all chains assigned to the entity we just added
+            for ch in ent.chains:
+                if info.GetMMCifEntityIdTr(ch.name.split(".")[-1]) == entity_id:
+                    entity_info[-1].asym_ids.append(ch.name)
+            # deal with heterogeneities
+            for a,b in zip(entity_desc.hetero_num, entity_desc.hetero_ids):
+                entity_info[-1].AddHet(a,b)
+        writer = io.MMCifWriter()
+        writer.SetStructure(ent, lib, entity_info=entity_info)
+        writer.Write(pocket_name, str(output_cif_file))    
     except Exception as e:
         logging.error(f"Could not save {output_cif_file}: {e}")
 
@@ -102,7 +124,7 @@ def save_pocket(pocket_name, cif_folder, output_folder, overwrite=True):
     output_ligand_prefix.mkdir(exist_ok=True)
     if output_cif_file.exists() and not overwrite:
         return
-    biounit, seqres = load_biounit_seqres(cif_file, biounit_id)
+    biounit, seqres, info = load_biounit_seqres(cif_file, biounit_id)
     if biounit is None or seqres is None:
         return
     chain_to_sequence = {s.name: s.string for s in seqres if s.name in protein_chains}
@@ -115,7 +137,7 @@ def save_pocket(pocket_name, cif_folder, output_folder, overwrite=True):
     ent_selected = mol.CreateEntityFromView(biounit.Select(" or ".join(f"chain='{c}'" for c in protein_chains + ligand_chains)), True)
     save_ligands(ent_selected, ligand_chains, output_ligand_prefix)
     save_sequences(ent_selected, output_fasta_file, chain_to_sequence)
-    save_cif_file(ent_selected, output_cif_file)
+    save_cif_file(ent_selected, output_cif_file, info, pocket_name)
     
     name_mapping, ent_renamed = rename_chains(biounit, ent_selected.Copy(), protein_chains, ligand_chains)
     save_pdb_file(ent_renamed, output_pdb_file, name_mapping, output_name_mapping_file)
