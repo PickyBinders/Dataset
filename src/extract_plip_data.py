@@ -115,13 +115,13 @@ def interactions_to_dataframe(interactions: ty.List[PLIPInteraction]) -> pnd.Dat
     df = df.join(df["extra"].apply(pnd.Series).add_prefix("info_"))
     df = df.join(df["info_extra"].apply(pnd.Series).add_prefix("info_"))
     df = df.drop(columns=["extra", "info_extra"])
-    df["hash"] = df.apply(lambda row: PLIPHash.from_row(row).to_string(), axis=1)
+    df["ligand_interacting_protein_chains_interactions"] = df.apply(lambda row: PLIPHash.from_row(row).to_string(), axis=1)
     df["info_restype_lig"] = df["info_restype_lig"].apply(lambda x: "SODIUM" if str(x) == "nan" else x)
-    df = df[df["hash"].notnull()].reset_index(drop=True)
-    df = df.drop_duplicates(subset=["pdb_id", "biounit", "orig_cif_chain", "orig_cif_chain_ligand", "position", "hash"], keep="first")
+    df = df[df["ligand_interacting_protein_chains_interactions"].notnull()].reset_index(drop=True)
+    df = df.drop_duplicates(subset=["pdb_id", "biounit", "orig_cif_chain", "orig_cif_chain_ligand", "position", "ligand_interacting_protein_chains_interactions"], keep="first")
     return df
 
-def get_interactions_from_json(pdb_id, json_file: Path):
+def get_interactions_from_json(pdb_id, json_file: Path, instance_starts):
     """Extracts interactions from a PLIP JSON file."""
     with open(json_file) as f:
         json_data = json.load(f)
@@ -134,15 +134,20 @@ def get_interactions_from_json(pdb_id, json_file: Path):
     # Get the mapping between the original MMCIF chains and the chains used by PLIP
     orig_pdb_mapping = {}
     orig_cif_mapping = {}
+    instances = {}
     interacting_ligands = defaultdict(set)
     protein_chains = set()
     for x in json_data['entities']:
         for c in x['chains']:
             if c['orig_pdb_name'] is not None:
+                if c['orig_cif_name'] not in instances:
+                    instances[c['orig_cif_name']] = instance_starts.get(f'{pdb_id}__{biounit}', {}).get(c['orig_cif_name'], 1)
+                chain_name = str(instances[c['orig_cif_name']]) + "." + c['orig_cif_name']
                 if 'atom_seq' in c:
-                    protein_chains.add(c['orig_cif_name'])
+                    protein_chains.add(chain_name)
                 orig_pdb_mapping[c['name']] = c['orig_pdb_name']
-                orig_cif_mapping[c['name']] = c['orig_cif_name']
+                orig_cif_mapping[c['name']] = chain_name
+                instances[c['orig_cif_name']] += 1
 
     # Get the interacting ligands for each ligand chain
     for x in json_data['entities']:
@@ -151,7 +156,7 @@ def get_interactions_from_json(pdb_id, json_file: Path):
                 for ligand in c.get('in_contact', []):
                     chain, name = ligand.split(".")
                     if chain == "_":
-                        interacting_ligands[c['orig_cif_name']].add(orig_cif_mapping[name])
+                        interacting_ligands[orig_cif_mapping[c['name']]].add(orig_cif_mapping[name])
     interactions = []
     errors = []
     for key in json_data['plip']:
@@ -181,8 +186,8 @@ def get_interactions_from_json(pdb_id, json_file: Path):
     return interactions, errors
     
 
-def interactions_from_folder(super_pdb_folder_output_folder, overwrite=True):
-    super_pdb_folder, output_folder = super_pdb_folder_output_folder
+def interactions_from_folder(args, overwrite=True):
+    super_pdb_folder, output_folder, instance_starts = args
     output_folder = Path(output_folder)
     super_pdb_folder = Path(super_pdb_folder)
     output_file = output_folder / f"{super_pdb_folder.name}.tsv"
@@ -197,7 +202,7 @@ def interactions_from_folder(super_pdb_folder_output_folder, overwrite=True):
         for json_file in pdb_folder.iterdir():
             if not json_file.stem.startswith("annotation."):
                 continue
-            interactions_, errors_ = get_interactions_from_json(pdb_id, json_file)
+            interactions_, errors_ = get_interactions_from_json(pdb_id, json_file, instance_starts)
             interactions += interactions_
             errors += errors_
     df = interactions_to_dataframe(interactions)
@@ -236,15 +241,14 @@ def group_interactions(output_folder):
         df_prox_res = df.groupby("plip_pocket_ID").agg({"protein_residue": "unique"})
         df_prox_chains = df.groupby("plip_pocket_ID").agg({"orig_cif_chain": "unique"})
         df_prox_ligand_chains = df.groupby("plip_pocket_ID").agg({"prox_ligand_chains": "first"})
-        plip_df = df.groupby(["plip_pocket_ID", "ligtype"])["hash"].apply(lambda x: ";".join(sorted(x))).reset_index()
-        plip_df["PDB_ID"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[0].upper())
-        plip_df["biounit"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[1])
-        plip_df["Ligand"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[2].upper())
-        plip_df["ligand_mmcif_chain"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[3])
-        plip_df["ligand_mmcif_chain"] = plip_df["ligand_mmcif_chain"].apply(lambda x: "NA" if str(x) == "nan" else x)
-        plip_df["prox_plip_residues"] = plip_df["plip_pocket_ID"].map(df_prox_res["protein_residue"])
-        plip_df["prox_plip_chains"] = plip_df["plip_pocket_ID"].map(df_prox_chains["orig_cif_chain"])
-        plip_df["prox_plip_ligand_chains"] = plip_df["plip_pocket_ID"].map(df_prox_ligand_chains["prox_ligand_chains"])
+        plip_df = df.groupby(["plip_pocket_ID", "ligtype"])["ligand_interacting_protein_chains_interactions"].apply(lambda x: ";".join(sorted(x))).reset_index()
+        plip_df["entry_pdb_id"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[0].upper())
+        plip_df["system_biounit"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[1])
+        plip_df["ligand_ccd_code"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[2].upper())
+        plip_df["ligand_chain"] = plip_df["plip_pocket_ID"].apply(lambda x: x.split("_")[3])
+        plip_df["ligand_interacting_residues"] = plip_df["plip_pocket_ID"].map(df_prox_res["protein_residue"])
+        plip_df["ligand_interacting_protein_chains"] = plip_df["plip_pocket_ID"].map(df_prox_chains["orig_cif_chain"])
+        plip_df["ligand_neighboring_ligand_chains"] = plip_df["plip_pocket_ID"].map(df_prox_ligand_chains["prox_ligand_chains"])
         df_interactions.append(plip_df)
     df_interactions = pnd.concat(df_interactions, ignore_index=True)
     df_interactions.to_csv(output_folder / "interactions.tsv", sep="\t", index=False)
@@ -252,14 +256,16 @@ def group_interactions(output_folder):
 
 def main():
     from sys import argv
-    smtl_dir, output_folder, n_threads = argv[1:]
+    instance_starts, smtl_dir, output_folder, n_threads = argv[1:]
+    with open(instance_starts) as f:
+        instance_starts = json.load(f)
     output_folder = Path(output_folder)
     smtl_dir = Path(smtl_dir)
     num_per_folder = {d: sum(1 for _ in d.iterdir()) for d in smtl_dir.iterdir()}
     sorted_names = sorted(num_per_folder, key=lambda x: num_per_folder[x], reverse=True)
     with Pool(int(n_threads)) as p:
         _ = list(tqdm(p.imap(interactions_from_folder, 
-                             [(s, output_folder) for s in sorted_names]),
+                             [(s, output_folder, instance_starts) for s in sorted_names]),
                              total=len(sorted_names)))
     group_interactions(output_folder)
 

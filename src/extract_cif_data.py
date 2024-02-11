@@ -1,3 +1,4 @@
+from collections import defaultdict
 from ost import io, mol
 
 from pathlib import Path
@@ -14,7 +15,8 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
     """
     cifs_dir = Path(cif_dir)
     data = dict(dates=dict(), pockets=dict(), uniprot_ids=dict(), 
-                chain_mapping=dict(), lengths=dict(), entity_mapping=dict())
+                chain_mapping=dict(), lengths=dict(), 
+                entity_mapping=dict(), instance_starts=dict())
     for cif_file in tqdm(cifs_dir.iterdir()):
         try:
             plc, seqres, info = io.LoadMMCIF(str(cif_file), info=True, seqres=True)
@@ -43,6 +45,10 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
             except Exception as e:
                 logging.error(f"BioUnitError: Could not create biounit for {cif_file}: {e}")
                 continue
+            instance_starts_biounit = defaultdict(list)
+            for chain in biounit.chains:
+                instance_starts_biounit[chain.name.split(".")[-1]].append(int(chain.name.split(".")[0]))
+            data["instance_starts"][f"{entry_id}__{b.id}"] = {k: min(v) for k, v in instance_starts_biounit.items() if min(v) > 1}
             protein_chains = [chain for chain in biounit.chains if chain.type == mol.CHAINTYPE_POLY_PEPTIDE_L]
             if len(protein_chains) == 0:
                 continue
@@ -56,8 +62,7 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
                 for ligand in ligand_chain.residues:
                     selection = biounit.Select(f"{threshold} <> [cname='{ligand.chain.name}' and rnum={ligand.number.num}] and protein=True")
                     try:
-                        pocket = [{"chain": r.chain.name.split(".")[-1], 
-                                   "instance": r.chain.name.split(".")[0],
+                        pocket = [{"chain": r.chain.name, 
                                 "one_letter_code": r.one_letter_code, 
                                 "residue_index": resnum_mapping[r.chain.name][r.number.num], 
                                 "residue_number": r.number.num} for r in selection.residues]
@@ -65,8 +70,7 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
                         pocket = None
                     if pocket is not None and len(pocket) > 0:
                         num += 1
-                        ligand_chain_name = ligand.chain.name.split(".")[-1]
-                        data["pockets"][f'{entry_id}__{b.id}__{ligand_chain_name}'] = {"pocket_residues": pocket, "center_of_mass": list(ligand.GetCenterOfMass())}
+                        data["pockets"][f'{entry_id}__{b.id}__{ligand.chain.name}'] = {"pocket_residues": pocket, "center_of_mass": list(ligand.GetCenterOfMass())}
         if num > 0:
             print(f"Extracted {num} binding sites for {entry_id}")
     with open(out_file, "w") as f:

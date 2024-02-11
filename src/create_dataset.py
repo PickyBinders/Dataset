@@ -8,12 +8,11 @@ from collections import defaultdict
 import json
 from rdkit import Chem
 from rdkit import RDLogger
-from pdbeccdutils.core import ccd_reader
+import gzip
 
 VALIDATION_COLUMNS = [
  'rscc',
  'rsr',
- "entry_resolution",
  "entry_r_minus_rfree",
  'entry_rfree',
  'entry_r',
@@ -22,7 +21,6 @@ VALIDATION_COLUMNS = [
  'entry_mean_b_factor',
  'entry_median_b_factor',
  'ligand_mmcif_chain',
- 'ligand_num_clashes',
  'Ligand',
  'PDB_chain',
  'PDB_ID',
@@ -35,6 +33,16 @@ VALIDATION_COLUMNS = [
  'pass',
  'PocketID',
  ]
+
+COLUMN_RENAME = {
+                "avgoccu": "ligand_average_occupancy",
+                "ccd_NumRotatableBonds": "ligand_rotatable_bonds_count",
+                'hash': 'ligand_interacting_protein_chains_interactions',
+                'pass': 'ligand_pass_validation_criteria',
+                'perc_prox_rscc': 'ligand_perc_prox_rscc',
+                'rscc': 'ligand_rscc',
+                'rsr': 'ligand_rsr',
+                }
 
 def read_df(df_file, columns=None):
     def parse_list_set(x, use_set=False):
@@ -52,15 +60,14 @@ def read_df(df_file, columns=None):
     df_file = Path(df_file)
     sep = "\t" if df_file.name.endswith(".tsv") else ","
     df = pnd.read_csv(df_file, sep=sep, low_memory=False, usecols=columns)
-    if "ligand_mmcif_chain" in df.columns:
-        df["ligand_mmcif_chain"] = df["ligand_mmcif_chain"].apply(lambda x: "NA" if str(x) == "nan" else x)
-    df["Ligand"] = df["Ligand"].apply(lambda x: "SODIUM" if x == "NA" or str(x) == "nan" else x)
-    if "ligand_mmcif_chain" in df.columns:
-        df["joint_pocket_ID"] = df["PDB_ID"] + "_" + df["Ligand"] + "_" + df["ligand_mmcif_chain"]
-    for column in ["prox_plip_ligand_chains", "prox_plip_chains", "prox_plip_residues", "prox_chains", "prox_residues"]:
+    df = df.rename(columns={"Ligand": "ligand_ccd_code", "PDB_ID": "entry_pdb_id"})
+    if "ligand_ccd_code" in df.columns:
+        df["ligand_ccd_code"] = df["ligand_ccd_code"].apply(lambda x: "SODIUM" if x == "NA" or str(x) == "nan" else x)
+    for column in ["ligand_neighboring_ligand_chains", "ligand_interacting_protein_chains", "ligand_interacting_residues", "ligand_neighboring_protein_chains", "ligand_neighboring_residues"]:
         if column in df.columns:
             df[column] = df[column].apply(lambda x: parse_list_set(x, use_set=True))
-    for column in ["center_of_mass", "protein_chain_lengths", "UniProt_IDs", "num_uniprot_ids", "num_pdbs_for_uniprots"]:
+    for column in ["ligand_center_of_mass", "ligand_interacting_protein_chains_lengths", 
+                   "ligand_interacting_protein_chains_uniprot_ids", "num_pdbs_for_uniprots"]:
         if column in df.columns:
             df[column] = df[column].apply(lambda x: parse_list_set(x))
     return df
@@ -134,21 +141,21 @@ def label_artifacts(df, artifact_file, within_entry_threshold=15, num_prox_plip_
     with open(artifact_file) as f:
         for line in f:
             ignore_ligands.add(line.strip().split("\t")[0])
-    df["is_biolip_artifact"] = df["Ligand"].apply(lambda x: x in ignore_ligands)
-    df["is_artifact"] = [False] * len(df)
-    df.loc[df[df["Ligand"].isin(ignore_ligands)].groupby(["PDB_ID", "Ligand"]).filter(lambda x: len(x) > within_entry_threshold).index, "is_artifact"] = True
-    df["is_artifact"] = df["is_artifact"] | (df["is_biolip_artifact"] & (df["num_prox_plip_residues"] < num_prox_plip_residues_threshold))
-    ligand_counts = dict(zip(df["Ligand"].value_counts().index, df["Ligand"].value_counts().values))
+    df["ligand_in_biolip_artifact_list"] = df["ligand_ccd_code"].apply(lambda x: x in ignore_ligands)
+    df["ligand_is_artifact"] = [False] * len(df)
+    df.loc[df[df["ligand_ccd_code"].isin(ignore_ligands)].groupby(["entry_pdb_id", "ligand_ccd_code"]).filter(lambda x: len(x) > within_entry_threshold).index, "ligand_is_artifact"] = True
+    df["ligand_is_artifact"] = df["ligand_is_artifact"] | (df["ligand_in_biolip_artifact_list"] & (df["ligand_interacting_residues_count"] < num_prox_plip_residues_threshold))
+    ligand_counts = dict(zip(df["ligand_ccd_code"].value_counts().index, df["ligand_ccd_code"].value_counts().values))
     common_ligands = set(str(x) for x in ligand_counts if ligand_counts[x] > common_ligand_threshold)
-    df["is_artifact"] = df["is_artifact"] | ((df["is_biolip_artifact"]) & (df["Ligand"].isin(common_ligands)) & (df["ligand_type"] != "cofactor"))
+    df["ligand_is_artifact"] = df["ligand_is_artifact"] | ((df["ligand_in_biolip_artifact_list"]) & (df["ligand_ccd_code"].isin(common_ligands)) & (df["ligand_type"] != "cofactor"))
     return df
 
 def label_ligand_types(df, parsed_components, cofactor_file):
     RDLogger.DisableLog('rdApp.*')
-    sm_types = dict(zip(df["Ligand"], df["ligtype"]))
+    sm_types = dict(zip(df["ligand_ccd_code"], df["ligtype"]))
     cofactors = parse_cofactors(cofactor_file)
     ligand_types = {}
-    for lig in df["Ligand"].unique():
+    for lig in df["ligand_ccd_code"].unique():
         lig = str(lig)
         if sm_types.get(lig, None) == "ION":
             ligand_types[lig] = "ion"
@@ -158,7 +165,7 @@ def label_ligand_types(df, parsed_components, cofactor_file):
             ligand_types[lig] = classify_ligand_rdkit(parsed_components[lig].component)
         else:
             ligand_types[lig] = "invalid"
-    df["ligand_type"] = df["Ligand"].apply(lambda x: ligand_types[str(x)])
+    df["ligand_type"] = df["ligand_ccd_code"].apply(lambda x: ligand_types[str(x)])
     return df
 
 
@@ -181,71 +188,69 @@ def get_uniprot_to_chains(chain_to_uniprots):
 
 def annotate_chains_and_residues(df, cif_data_dir):
     cif_data = load_cif_data(cif_data_dir)
-    df["num_prox_plip_chains"] = df["prox_plip_chains"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
-    df["num_prox_plip_residues"] = df["prox_plip_residues"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
-    df["prox_chains"] = df["single_pocket_ID"].apply(lambda x: set(y["chain"] for y in cif_data["pockets"][x]["pocket_residues"]) if x in cif_data["pockets"] else set())
-    df["num_prox_chains"] = df["prox_chains"].apply(lambda x: len(x))
-    df["prox_residues"] = df["single_pocket_ID"].apply(lambda x: set(f'{y["chain"]}:{y["residue_number"]}' for y in cif_data["pockets"][x]["pocket_residues"]) if x in cif_data["pockets"] else set())
-    df["center_of_mass"] = df["single_pocket_ID"].apply(lambda x: cif_data["pockets"][x]["center_of_mass"] if x in cif_data["pockets"] else None)
-    df["num_plip_interactions"] = df["hash"].apply(lambda x: len(str(x).split(";")) if x is not None and str(x) != "nan" else 0)
-    df["num_unique_plip_interactions"] = df["hash"].apply(lambda x: len(set(str(x).split(";"))) if x is not None and str(x) != "nan" else 0)
-    df["has_pocket"] = df["single_pocket_ID"].apply(lambda x: x in cif_data["pockets"])
-    df["UniProt_IDs"] = df.apply(lambda row: [cif_data["uniprot_ids"].get(f'{row["PDB_ID"]}_{y}', '') for y in sorted(row["prox_plip_chains"])] if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
+    df["ligand_interacting_protein_chains_count"] = df["ligand_interacting_protein_chains"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
+    df["ligand_interacting_protein_chains_string"] = df["ligand_interacting_protein_chains"].apply(lambda x: "_".join(sorted(x)) if str(x) != "nan" else np.nan)
+    df["ligand_interacting_residues_count"] = df["ligand_interacting_residues"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
+    df["ligand_neighboring_protein_chains"] = df["ligand_system_ID"].apply(lambda x: set(y["chain"] for y in cif_data["pockets"][x]["pocket_residues"]) if x in cif_data["pockets"] else set())
+    df["ligand_neighboring_protein_chains_count"] = df["ligand_neighboring_protein_chains"].apply(lambda x: len(x))
+    df["ligand_neighboring_residues"] = df["ligand_system_ID"].apply(lambda x: set(f'{y["chain"]}:{y["residue_number"]}' for y in cif_data["pockets"][x]["pocket_residues"]) if x in cif_data["pockets"] else set())
+    df["ligand_center_of_mass"] = df["ligand_system_ID"].apply(lambda x: cif_data["pockets"][x]["center_of_mass"] if x in cif_data["pockets"] else None)
+    df["ligand_interacting_protein_chains_interactions_count"] = df["ligand_interacting_protein_chains_interactions"].apply(lambda x: len(str(x).split(";")) if x is not None and str(x) != "nan" else 0)
+    df["has_pocket"] = df["ligand_system_ID"].apply(lambda x: x in cif_data["pockets"])
+    df["ligand_interacting_protein_chains_uniprot_ids"] = df.apply(lambda row: [cif_data["uniprot_ids"].get(f'{row["entry_pdb_id"]}_{y.split(".")[-1]}', '') for y in row["ligand_interacting_protein_chains_string"].split("_")] if str(row["ligand_interacting_protein_chains_string"]) != "nan" else np.nan, axis=1)
     uniprot_to_chains = get_uniprot_to_chains(cif_data["uniprot_ids"])
-    df["num_pdbs_for_uniprots"] = df["UniProt_IDs"].apply(lambda x: [len(uniprot_to_chains.get(y, [])) for y in x] if str(x) != "nan" else np.nan)
-    df["date"] = df["PDB_ID"].apply(lambda x: cif_data["dates"].get(x.upper(), np.nan))
-    df["year"] = df["date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
-    df["single_pocket_chains"] = df.apply(lambda row: "_".join(sorted(row["prox_plip_chains"])) if str(row["prox_plip_chains"]) != "nan" else np.nan, axis=1)
-    df["protein_chain_lengths"] = df.apply(lambda row: [cif_data["lengths"][row["PDB_ID"]].get(y, np.nan) for y in row["single_pocket_chains"].split("_")] if row["PDB_ID"] in cif_data["lengths"] and str(row["single_pocket_chains"]) != "nan" else np.nan, axis=1)
-    df["protein_entity_ids"] = df.apply(lambda row: [cif_data["entity_mapping"][row["PDB_ID"]].get(y, np.nan) for y in row["single_pocket_chains"].split("_")] if row["PDB_ID"] in cif_data["entity_mapping"] and str(row["single_pocket_chains"]) != "nan" else np.nan, axis=1)
-    df["ligand_entity_id"] = df.apply(lambda row: cif_data["entity_mapping"][row["PDB_ID"]].get(row["ligand_mmcif_chain"], np.nan) if row["PDB_ID"] in cif_data["entity_mapping"] else np.nan, axis=1)
+    df["num_pdbs_for_uniprots"] = df["ligand_interacting_protein_chains_uniprot_ids"].apply(lambda x: [len(uniprot_to_chains.get(y, [])) for y in x] if str(x) != "nan" else np.nan)
+    df["entry_release_date"] = df["entry_pdb_id"].apply(lambda x: cif_data["dates"].get(x.upper(), np.nan))
+    df["entry_release_year"] = df["entry_release_date"].apply(lambda x: x.split("-")[0] if str(x) != "nan" else np.nan)
+    df["ligand_interacting_protein_chains_lengths"] = df.apply(lambda row: [cif_data["lengths"][row["entry_pdb_id"]].get(y.split(".")[-1], np.nan) for y in row["ligand_interacting_protein_chains_string"].split("_")] if row["entry_pdb_id"] in cif_data["lengths"] and str(row["ligand_interacting_protein_chains_string"]) != "nan" else np.nan, axis=1)
+    df["ligand_interacting_protein_chains_entity_ids"] = df.apply(lambda row: [cif_data["entity_mapping"][row["entry_pdb_id"]].get(y.split(".")[-1], np.nan) for y in row["ligand_interacting_protein_chains_string"].split("_")] if row["entry_pdb_id"] in cif_data["entity_mapping"] and str(row["ligand_interacting_protein_chains_string"]) != "nan" else np.nan, axis=1)
+    df["ligand_entity_id"] = df.apply(lambda row: cif_data["entity_mapping"][row["entry_pdb_id"]].get(row["ligand_chain"].split(".")[-1], np.nan) if row["entry_pdb_id"] in cif_data["entity_mapping"] else np.nan, axis=1)
     return df
 
 
 def assign_pocket(df):
-    df["Pocket_Number"] = [None] * len(df)
-    # Assign to same pocket if prox_ligand_chains overlaps with ligand_mmcif_chain
-    for (pdb_id, biounit), group in tqdm(df.groupby(['PDB_ID', 'biounit'])):
+    df["system_number"] = [None] * len(df)
+    # Assign to same pocket if ligand_neighboring_ligand_chains overlaps with ligand_chain
+    for (pdb_id, biounit), group in tqdm(df.groupby(['entry_pdb_id', 'system_biounit'])):
         pocket_number = 0
         pocket_dict = {}
         for index, row in group.iterrows():
-            prox_ligand_chains = row['prox_plip_ligand_chains']
+            prox_ligand_chains = row['ligand_neighboring_ligand_chains']
             if prox_ligand_chains is None:
                 prox_ligand_chains = set()
             prox_ligand_chains = set(prox_ligand_chains)
             assigned = False
             for key, value in pocket_dict.items():
-                if row['ligand_mmcif_chain'] in value or len(prox_ligand_chains.intersection(value)) > 0:
-                    df.loc[index, 'Pocket_Number'] = key
+                if row['ligand_chain'] in value or len(prox_ligand_chains.intersection(value)) > 0:
+                    df.loc[index, 'system_number'] = key
                     pocket_dict[key] |= prox_ligand_chains
                     assigned = True
                     break
             if not assigned:
                 pocket_name = f"{pdb_id}_{int(biounit)}_{pocket_number}"
                 ligand_chains = prox_ligand_chains.copy()
-                ligand_chains.add(row['ligand_mmcif_chain'])
+                ligand_chains.add(row['ligand_chain'])
                 pocket_dict[pocket_name] = ligand_chains
-                df.loc[index, 'Pocket_Number'] = pocket_name
+                df.loc[index, 'system_number'] = pocket_name
                 pocket_number += 1
-    df = df[df["Pocket_Number"].notnull()].reset_index(drop=True)
+    df = df[df["system_number"].notnull()].reset_index(drop=True)
     pocket_to_id = {}
     pocket_to_nums = {}
-    for _, pocket in tqdm(df.groupby("Pocket_Number")):
+    for _, pocket in tqdm(df.groupby("system_number")):
         ligand_chain_to_name = {}
         for _, row in pocket.iterrows():
-            ligand_chain_to_name[row["ligand_mmcif_chain"]] = row["Ligand"]
+            ligand_chain_to_name[row["ligand_chain"]] = row["ligand_ccd_code"]
         ligand_chains = sorted(ligand_chain_to_name)
         ligand_names = [ligand_chain_to_name[x] for x in sorted(ligand_chain_to_name)]
-        protein_chains = sorted(set(y for x in pocket["prox_plip_chains"] for y in x if str(y) != "nan"))
-        pocket_to_id[pocket["Pocket_Number"].values[0]] = f"{pocket['PDB_ID'].values[0]}__{int(pocket['biounit'].values[0])}__{'_'.join(protein_chains)}__{'_'.join(ligand_chains)}__{'_'.join(ligand_names)}"
-        pocket_to_nums[pocket["Pocket_Number"].values[0]] = (len(ligand_chains), len(protein_chains))
-    df["pocket_ID"] = df["Pocket_Number"].apply(lambda x: pocket_to_id[x])
-    df["num_ligands_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][0])
-    df["num_chains_in_pocket"] = df["Pocket_Number"].apply(lambda x: pocket_to_nums[x][1])
+        protein_chains = sorted(set(y for x in pocket["ligand_interacting_protein_chains"] for y in x if str(y) != "nan"))
+        pocket_to_id[pocket["system_number"].values[0]] = f"{pocket['entry_pdb_id'].values[0]}__{int(pocket['system_biounit'].values[0])}__{'_'.join(protein_chains)}__{'_'.join(ligand_chains)}__{'_'.join(ligand_names)}"
+        pocket_to_nums[pocket["system_number"].values[0]] = (len(ligand_chains), len(protein_chains))
+    df["system_ID"] = df["system_number"].apply(lambda x: pocket_to_id[x])
+    df["system_ligand_chains_count"] = df["system_number"].apply(lambda x: pocket_to_nums[x][0])
+    df["system_protein_chains_count"] = df["system_number"].apply(lambda x: pocket_to_nums[x][1])
     return df
 
 def get_smtl_info(pdb_id, smtl_dir):
-    #TODO: get these from cif_data instead
     smtl_dir = Path(smtl_dir)
     pdb_id = pdb_id.lower()
     data = []
@@ -256,15 +261,14 @@ def get_smtl_info(pdb_id, smtl_dir):
             continue
         if not all(x.isdigit() for x in annotation["mmcif_id"]):
             continue
-        data.append(dict(pdb_id=pdb_id.upper(), biounit=int(annotation["mmcif_id"]), 
-                         method=annotation["method"],
-                    resolution=annotation["resolution"], oligo_state=annotation["oligo_state"],
-                    transmembrane=annotation.get("membrane", {}).get("is_transmem", None)))
+        data.append(dict(entry_pdb_id=pdb_id.upper(), system_biounit=int(annotation["mmcif_id"]), 
+                         entry_determination_method=annotation["method"],
+                    entry_resolution=annotation["resolution"], entry_oligomeric_state=annotation["oligo_state"],
+                    entry_is_transmembrane=annotation.get("membrane", {}).get("is_transmem", None)))
     return data
 
 def get_covalent_info(pdb_id, pdb_dir):
     from mmcif.io.PdbxReader import PdbxReader
-    import gzip
     cif_file = Path(pdb_dir) / pdb_id[1:3].lower() / f"{pdb_id.lower()}.cif.gz"
     if not cif_file.exists():
         return None
@@ -290,13 +294,13 @@ def get_covalent_info(pdb_id, pdb_dir):
 
 def label_smtl(df, smtl_dir, num_threads=20):
     annotations = {}
-    input_args = [(pdb_id, smtl_dir) for pdb_id in df["PDB_ID"].unique()]
+    input_args = [(pdb_id, smtl_dir) for pdb_id in df["entry_pdb_id"].unique()]
     with Pool(num_threads) as p:
         for annotation_list in p.starmap(get_smtl_info, input_args):
             for annotation in annotation_list:
-                annotations[(annotation["pdb_id"], annotation["biounit"])] = annotation
-    for a in ["method", "oligo_state", "transmembrane", "resolution"]:
-        df[a] = df.apply(lambda row: annotations.get((row["PDB_ID"], int(row["biounit"])), {}).get(a, np.nan), axis=1)
+                annotations[(annotation["entry_pdb_id"], annotation["system_biounit"])] = annotation
+    for a in ["entry_determination_method", "entry_oligomeric_state", "entry_is_transmembrane", "entry_resolution"]:
+        df[a] = df.apply(lambda row: annotations.get((row["entry_pdb_id"], int(row["system_biounit"])), {}).get(a, np.nan), axis=1)
     return df
 
 def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
@@ -313,12 +317,13 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
         subset_folder.mkdir(exist_ok=True)
         first_time = set()
         with open(folder / f"{name}.txt" , "w") as f:
-            for pdb_id, rows in tqdm(df.groupby("PDB_ID")):
+            for pdb_id, rows in tqdm(df.groupby("entry_pdb_id")):
                 asym_auth_chain_mapping = {v: k for k, v in chain_mapping.get(pdb_id, {}).items()}
                 pdb_id = pdb_id.lower()
                 chains = set()
                 for _, row in rows.iterrows():
-                    chains |= set(row["prox_plip_chains"])
+                    chains |= set(row["ligand_interacting_protein_chains"])
+                chains = set(x.split(".")[-1] for x in chains)
                 auth_chains = set(asym_auth_chain_mapping[x] for x in chains if x in asym_auth_chain_mapping)
                 for chain in auth_chains:
                     if source == "foldseek":
@@ -340,6 +345,7 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
 
 def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
                          smtl_dir, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
+    from pdbeccdutils.core import ccd_reader
     """
     dataset_dir: directory to save the dataset files
     foldseek_dir: directory to save the Foldseek files
@@ -362,16 +368,21 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     
     if overwrite or not all_pockets_file.exists():
         plip_df = read_df(plip_file)
-        plip_df = plip_df[(~plip_df["biounit"].str.startswith("ASU")) & (~plip_df["biounit"].str.startswith("PAU")) & (~plip_df["biounit"].str.startswith("XAU"))].reset_index(drop=True)
+        plip_df["plip_ligand_chain"] = plip_df["ligand_chain"].apply(lambda x: x.split(".")[-1])
+        plip_df["joint_pocket_ID"] = plip_df["entry_pdb_id"] + "_" + plip_df["ligand_ccd_code"] + "_" + plip_df["plip_ligand_chain"]
         print("Number of PLIP pockets:", len(plip_df))
         df = read_df(validation_file, columns=VALIDATION_COLUMNS)
         print("Number of validation pockets:", len(df))
-        df.rename(columns={"PocketID": "validation_pocket_ID"}, inplace=True)
+        df.rename(columns={"PocketID": "validation_pocket_ID", "ligand_mmcif_chain": "validation_ligand_chain"}, inplace=True)
+        df["validation_ligand_chain"] = df["validation_ligand_chain"].apply(lambda x: "NA" if str(x) == "nan" else x)
+        df["joint_pocket_ID"] = df["entry_pdb_id"] + "_" + df["ligand_ccd_code"] + "_" + df["validation_ligand_chain"]
         df = pnd.merge(df, plip_df, 
-                    on=['joint_pocket_ID', "PDB_ID", "Ligand", "ligand_mmcif_chain"], 
+                    on=['joint_pocket_ID', "entry_pdb_id", "ligand_ccd_code"], 
                     how='outer')
-        df["biounit"] = df["biounit"].fillna(1)
-        df["single_pocket_ID"] = df.apply(lambda row: f'{row["PDB_ID"]}__{int(row["biounit"])}__{row["ligand_mmcif_chain"]}', axis=1)
+        df.rename(columns=COLUMN_RENAME, inplace=True)
+        df["ligand_chain"] = df.apply(lambda row: row["ligand_chain"] if str(row["ligand_chain"]) != "nan" else f'1.{row["validation_ligand_chain"]}', axis=1)
+        df["system_biounit"] = df["system_biounit"].fillna(1)
+        df["ligand_system_ID"] = df.apply(lambda row: f'{row["entry_pdb_id"]}__{int(row["system_biounit"])}__{row["ligand_chain"]}', axis=1)
         print("Annotation of chains and residues")
         df = annotate_chains_and_residues(df, cif_data_dir)
         RDLogger.DisableLog('rdApp.*')
@@ -380,32 +391,32 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
         df = label_ligand_types(df, parsed_components, cofactor_file)
         print("Labeling artifacts")
         df = label_artifacts(df, artifact_file)
-        print("Annotating info from SMTL")
-        df = label_smtl(df, smtl_dir, num_threads=num_threads)
         df["has_plip"] = df["plip_pocket_ID"].notna()
         df["has_validation"] = df["validation_pocket_ID"].notna()
         df.to_csv(all_pockets_file, index=False)
     df = read_df(all_pockets_file)
-    print("Number of pockets after merging PLIP and validation:", len(df), df["joint_pocket_ID"].nunique())
+    print("Number of pockets after merging PLIP and validation:", len(df), df["ligand_system_ID"].nunique())
     df = df[df["has_plip"] & df["has_pocket"]].reset_index(drop=True)
     df = assign_pocket(df)
     print("Number of pockets after filtering for PLIP and binding sites and merging pockets")
     print("\tTotal rows:", len(df))
-    print("\tTotal pockets:", df["joint_pocket_ID"].nunique())
-    print("\tTotal merged pockets:", df["Pocket_Number"].nunique())
+    print("\tTotal pockets:", df["ligand_system_ID"].nunique())
+    print("\tTotal merged pockets:", df["system_ID"].nunique())
     df.to_csv(dataset_dir / "all_pockets_with_plip_and_bs.csv", index=False)
-    df["is_ion"] = df["ligand_type"] == "ion"
-    only_ions = df.groupby("Pocket_Number").agg({"is_ion": "all"})
-    only_ions = only_ions[only_ions["is_ion"]].index
-    df = df[~df["Pocket_Number"].isin(only_ions)]
+    df["ligand_is_ion"] = df["ligand_type"] == "ion"
+    only_ions = df.groupby("system_ID").agg({"ligand_is_ion": "all"})
+    only_ions = only_ions[only_ions["ligand_is_ion"]].index
+    df = df[~df["system_ID"].isin(only_ions)]
     df.to_csv(dataset_dir / "small_molecule_pockets.csv", index=False)
-    print("Number of pockets with small molecules:", df["Pocket_Number"].nunique())
-    sm_pockets = df[(~df["is_ion"]) & (~df["is_artifact"])]["Pocket_Number"].unique()
-    df = df[df["Pocket_Number"].isin(sm_pockets)]
-    print("Number of pockets with small molecules (no artifacts):", df["Pocket_Number"].nunique())
+    print("Number of pockets with small molecules:", df["system_ID"].nunique())
+    sm_pockets = df[(~df["ligand_is_ion"]) & (~df["ligand_is_artifact"])]["system_ID"].unique()
+    df = df[df["system_ID"].isin(sm_pockets)]
+    print("Number of pockets with small molecules (no artifacts):", df["system_ID"].nunique())
     df.to_csv(dataset_dir / "small_molecule_pockets_no_artifacts.csv", index=False)
-    df = df[(df["num_chains_in_pocket"] <= max_protein_chains) & (df["num_ligands_in_pocket"] <= max_ligand_chains)]
-    print("Number of pockets with small molecules (no artifacts, max protein chains, max ligand chains):", df["Pocket_Number"].nunique())
+    df = df[(df["system_protein_chains_count"] <= max_protein_chains) & (df["system_ligand_chains_count"] <= max_ligand_chains)]
+    print("Number of pockets with small molecules (no artifacts, max protein chains, max ligand chains):", df["system_ID"].nunique())
+    print("Annotating info from SMTL")
+    df = label_smtl(df, smtl_dir, num_threads=num_threads)
     df.to_csv(dataset_dir / "filtered_pockets.csv", index=False)
     chain_mapping = load_cif_data(cif_data_dir, names_to_load=["chain_mapping"])["chain_mapping"]
     make_subset_files(df, Path(foldseek_dir) / "filtered_pockets", Path(mmseqs_dir) / "filtered_pockets", chain_mapping, "filtered_pockets")
@@ -424,8 +435,8 @@ def main():
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
     parser.add_argument("smtl_dir", type=str, help="Directory with SMTL files")
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
-    parser.add_argument("--max_protein_chains", type=int, default=10, help="Maximum number of protein chains to consider")
-    parser.add_argument("--max_ligand_chains", type=int, default=5, help="Maximum number of ligand chains to consider")
+    parser.add_argument("--max_protein_chains", type=int, default=26, help="Maximum number of protein chains to consider")
+    parser.add_argument("--max_ligand_chains", type=int, default=36, help="Maximum number of ligand chains to consider")
     parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
     args = parser.parse_args()

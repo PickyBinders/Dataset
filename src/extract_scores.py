@@ -60,7 +60,8 @@ class PLCScorer:
     def initialise(cls, df_file, cif_data_dir):
         cif_data = load_cif_data(cif_data_dir, names_to_load=["pockets", "chain_mapping"])
         df = read_df(df_file)
-        single_pocket_ids = set(df["single_pocket_ID"]).intersection(cif_data["pockets"].keys())
+        df = df[(df["system_ligand_chains_count"] < 10) & (df["system_protein_chains_count"] < 10)].reset_index(drop=True)
+        single_pocket_ids = set(df["ligand_system_ID"]).intersection(cif_data["pockets"].keys())
         pocket_residues = {}
         pocket_to_hash = {plip_suffix: {} for plip_suffix in PLIP_SUFFIXES}
         for single_pocket_id, pocket in tqdm(cif_data["pockets"].items()):
@@ -71,8 +72,8 @@ class PLCScorer:
                 pocket_to_hash[plip_suffix][single_pocket_id] = defaultdict(dict)
             for residue in pocket["pocket_residues"]:
                 pocket_residues[single_pocket_id][residue['chain']][residue['residue_index'] + 1] = residue["residue_number"]
-        entry_to_pockets = df.groupby("PDB_ID").apply(lambda x: x["pocket_ID"].unique()).to_dict()
-        for single_pocket_id, plip_hashes in tqdm(zip(df["single_pocket_ID"], df["hash"])):
+        entry_to_pockets = df.groupby("entry_pdb_id").apply(lambda x: x["system_ID"].unique()).to_dict()
+        for single_pocket_id, plip_hashes in tqdm(zip(df["ligand_system_ID"], df["ligand_interacting_protein_chains_interactions"])):
             if single_pocket_id not in cif_data["pockets"]:
                 continue
             if str(plip_hashes) == "nan":
@@ -87,7 +88,7 @@ class PLCScorer:
                     if h_string is not None:
                         pocket_to_hash[plip_suffix][single_pocket_id][plip_hash.chain][res] += Counter([h_string])
         protein_chain_lengths = defaultdict(dict)
-        for entry, chains, chain_lengths in tqdm(zip(df["PDB_ID"], df["single_pocket_chains"], df["protein_chain_lengths"])):
+        for entry, chains, chain_lengths in tqdm(zip(df["entry_pdb_id"], df["ligand_interacting_protein_chains_string"], df["ligand_interacting_protein_chains_lengths"])):
             if str(chains) == "nan":
                 continue
             for chain, length in zip(chains.split("_"), chain_lengths):
@@ -116,7 +117,7 @@ class PLCScorer:
         for i, q_chain in enumerate(q_chains):
             q_chain_length = self.protein_chain_lengths[q_entry].get(q_chain, 0)
             for j, t_chain in enumerate(t_chains):
-                aln = q_alignments.get(t_entry, {}).get(q_chain, {}).get(t_chain, None)
+                aln = q_alignments.get(t_entry, {}).get(q_chain.split(".")[-1], {}).get(t_chain.split(".")[-1], None)
                 if aln is not None:
                     pair_scores = self.get_protein_scores_pair(aln)
                     if protein_chain_mapper is None:
@@ -146,7 +147,7 @@ class PLCScorer:
                 break
             q_idx, t_idx = np.unravel_index(np.argmax(s_matrix), s_matrix.shape)
             q_chain, t_chain = q_chains[q_idx], t_chains[t_idx]
-            aln = q_alignments[t_entry].get(q_chain, {}).get(t_chain, None)
+            aln = q_alignments[t_entry].get(q_chain.split(".")[-1], {}).get(t_chain.split(".")[-1], None)
             if aln is None:
                 continue
             q_chain_length = self.protein_chain_lengths[q_entry].get(q_chain, 0)
@@ -307,7 +308,7 @@ class PLCScorer:
                     q_pli_lengths[plip_suffix] += sum(sum(self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain][q_res].values()) for q_chain in self.pocket_to_hash[plip_suffix][q_single_pocket] for q_res in self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain])
         
             for t_entry in q_alignments:
-                if any(q_chain in q_alignments[t_entry] for q_chain in q_chains):
+                if any(q_chain.split(".")[-1] in q_alignments[t_entry] for q_chain in q_chains):
                     if t_entry not in self.entry_to_pockets:
                         continue
                     for t_pocket in self.entry_to_pockets[t_entry]:

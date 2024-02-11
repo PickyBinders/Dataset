@@ -3,6 +3,7 @@ from ost import conop, mol, io
 from pathlib import Path
 from tqdm import tqdm
 import logging
+from create_dataset import read_df
 
 # Define available names for protein and ligand chains
 PROTEIN_CHAINS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -107,12 +108,15 @@ def save_cif_file(ent, output_cif_file, info, pocket_name):
     except Exception as e:
         logging.error(f"Could not save {output_cif_file}: {e}")
 
-def save_pocket(pocket_name, cif_folder, output_folder, overwrite=True):
+def save_pocket(pocket_name, cif_folder, output_folder, overwrite=False):
+    if len(pocket_name) > 200:
+        logging.error(f"{pocket_name} too long for file creation. Skipping.")
+        return
     pdb_id, biounit_id, protein_chains, ligand_chains, _ = pocket_name.split("__")
     protein_chains, ligand_chains = protein_chains.split("_"), ligand_chains.split("_")
     cif_file = Path(cif_folder) / f"{pdb_id.lower()[1:3]}" / f"{pdb_id.lower()}.cif.gz"
     if not cif_file.exists():
-        logging.info(f"{cif_file} does not exist")
+        logging.error(f"{cif_file} does not exist")
         return
     output_folder_pocket = Path(output_folder) / pocket_name
     output_folder_pocket.mkdir(exist_ok=True)
@@ -127,18 +131,15 @@ def save_pocket(pocket_name, cif_folder, output_folder, overwrite=True):
     biounit, seqres, info = load_biounit_seqres(cif_file, biounit_id)
     if biounit is None or seqres is None:
         return
-    chain_to_sequence = {s.name: s.string for s in seqres if s.name in protein_chains}
-    protein_chains = [str(x) for x in biounit.GetChainList() if x.name.split(".")[-1] in protein_chains]
+    chain_to_sequence = {s.name: s.string for s in seqres}
     chain_to_sequence = {x: chain_to_sequence[x.split(".")[-1]] for x in protein_chains if x.split(".")[-1] in chain_to_sequence}
-    ligand_chains = [str(x) for x in biounit.GetChainList() if x.name.split(".")[-1] in ligand_chains]
-    if len(protein_chains) > len(PROTEIN_CHAINS) or len(ligand_chains) > len(LIGAND_CHAINS):
-        logging.info(f"Too many chains to convert to PDB for {pocket_name}")
-        return
     ent_selected = mol.CreateEntityFromView(biounit.Select(" or ".join(f"chain='{c}'" for c in protein_chains + ligand_chains)), True)
     save_ligands(ent_selected, ligand_chains, output_ligand_prefix)
     save_sequences(ent_selected, output_fasta_file, chain_to_sequence)
     save_cif_file(ent_selected, output_cif_file, info, pocket_name)
-    
+    if len(protein_chains) > len(PROTEIN_CHAINS) or len(ligand_chains) > len(LIGAND_CHAINS):
+        logging.error(f"Too many chains to convert to PDB for {pocket_name}")
+        return
     name_mapping, ent_renamed = rename_chains(biounit, ent_selected.Copy(), protein_chains, ligand_chains)
     save_pdb_file(ent_renamed, output_pdb_file, name_mapping, output_name_mapping_file)
 
@@ -147,20 +148,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--df_file", type=str, required=True)
     parser.add_argument("--output_folder", type=str, required=True)
-    parser.add_argument("--midfix", type=str, required=True)
+    parser.add_argument("--midfix", type=str, default=None)
     parser.add_argument(
         "--cif_dir", type=str, default="/scicore/data/managed/PDB/latest/data/structures/divided/mmCIF/",
         help="Path to mmcif directory."
     )
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    pocket_names = set(read_df(args.df_file)["pocket_ID"])
-    pocket_names = set(x for x in pocket_names if x[1:3].lower() == args.midfix)
+    pocket_names = set(read_df(args.df_file)["system_ID"])
+    if args.midfix is not None:
+        pocket_names = set(x for x in pocket_names if x[1:3].lower() == args.midfix)
     output_folder, cif_folder = args.output_folder, args.cif_dir
     Path(output_folder).mkdir(exist_ok=True)
     if len(pocket_names) == 0:
         return
     for pocket_name in tqdm(pocket_names):
-        save_pocket(pocket_name, cif_folder, output_folder)
+        save_pocket(pocket_name, cif_folder, output_folder, args.overwrite)
 
 if __name__ == "__main__":
     main()
