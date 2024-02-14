@@ -1,159 +1,60 @@
 # Protein-Ligand Complex Prediction Dataset
 
-## Overview
+## Available Data
+- `data_new.tsv`: The main dataset, containing all ligand systems and their annotations (previous version in `data.tsv` and `data_clean.tsv`)
+- `column_info.csv`: A description of each column in `data_new.tsv`
+- `component_mapping_new.tsv`: The connected component IDs for each system
+- `system_files_new`: The folder containing all files related to each system in corresponding subfolders. Each system subfolder has, `system.cif`, `system.fasta`, a folder called `ligand_files` with SDF files of each ligand, `system.pdb`, and `chain_mapping.json` describing the mapping between the original chain and renamed chain in the .pdb file.
+- `scores`, `components`, `component_info.csv`: Results of similarity searches and graph clustering
+- `validation`: Results of extracting validation report information
+- `cif_data`: Results of extracting data from CIF files
+- `annotations`: Examples of SMTL annotation files with PLIP data
+- `cross_docking`: Scores linking system_IDs to each other for cross-docking
+- `apo_scores`: Scores linking apo chains to system_IDs
+- `afdb_scores`: Scores linking AFDB structures to system_IDs
 
-### Sources of pockets
-![Sources of pockets](./figures/dataset_1.png)
+The Python scripts referenced below are in https://github.com/PickyBinders/Dataset
 
-1. PDB - See `extract_cif_data.py`. For all non-polymer chains in the PDB, all polymer chain residues within 8A of the non-polymer chain, and the center of mass of the non-polymer chain are extracted. (This is done at the biounit level)
-2. Validation criteria - See `extract_validation_data.py`. Information is extracted for each pocket from the PDB validation report. This only applies to pockets from X-ray structures with EDS data (doesn't handle oligosaccharides and oligonucleotides, performed at asymmetric unit level).
-3. PLIP - See `extract_plip_data.py`. Annotations detected by PLIP are extracted for each pocket in each biounit from SMTL.
+## Data Sources
+1. Protein Data Bank (PDB) MMCIF files (https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF)
+See `extract_cif_data.py`. 
+2. PDB XML validation reports (https://files.wwpdb.org/pub/pdb/validation_reports/)
+See `extract_validation_data.py`.
+3. Swiss Model Template Library (e.g https://swissmodel.expasy.org/templates/5KKH)
+See `extract_plip_data.py`.
+4. PDB Chemical Components Dictionary (https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz)
+5. PDB seqres (https://files.wwpdb.org/pub/pdb/derived_data/pdb_seqres.txt)
+6. AlphaFold Database (https://alphafold.ebi.ac.uk/)
+7. UniRef50 (https://www.ebi.ac.uk/uniprot/download-center)
 
-### Annotating pockets
-- All pockets and associated info from the 3 sources are merged into a single dataframe, using the PDB_ID, biounit and ligand_mmcif_chain as the key (see `create_dataset.py`)
-- Referred to as single ligand pockets (SPLC) - consists of (PDB_ID, biounit, ligand_mmcif_chain, prox_plip_chains)
-- Ligands are labeled as (see `label_ligand_types`):
-    - cofactor (from PDBe and extra from )
-    - drug-like
-    - fragment
-    - ion
-    - oligopeptide
-    - oligosaccharide
-    - oligonucleotide
-    - other
-- SPLC are labelled as artifacts if the ligand is present in the BioLiP artifact list and one of
-    - Has >15 instances of the same ligand in the same PDB
-    - Makes PLIP interactions with < 2 residues
-    - Present >2500 times overall
-- PDB chains are linked to UniProt IDs and vice versa using the SIFTS database. #TODO: use nextgen
-- PDB entries are labeled with oligomeric state and transmembrane presence using SMTL #TODO: use nextgen
-- SPLC are merged into multi-ligand pockets (PLC) if they share the same PDB_ID and biounit, and the ligands share a PLIP interaction.
+
+## Merging and annotating systems
+- All pockets and associated info from the 3 sources are merged into a single dataframe, using the entry_pdb_id, entry_biounit and ligand_chain as the key and annotated (see `create_dataset.py`). Each row of the resulting dataframe is referred to as a ligand system - identified by its (entry_pdb_id, entry_biounit, ligand_chain, ligand_interacting_protein_chains)
+- ligand systems are merged into systems if they share the same entry_pdb_id and entry_biounit, and the ligands are within 4A of each other.
 - Subsets are created by
-    - filtering out PLC with only ions
-    - filtering out PLC with only ions and/or artifacts
+    - filtering out systems with only ions
+    - filtering out systems with only ions and/or artifacts
+- The final dataset consists of all systems with at least one non-ion and non-artifact ligand having <10 protein chains and <10 ligand chains
+See `column_info.csv` for a description of each resulting column in the dataframe
 
+## System clustering
 
-### Pocket similarity
+A Foldseek search is run on all PDB chains participating in a system (parameters in `run_foldseek.sh`), and the alignments and per-residue lDDT scores are saved. Protein, pocket, pli and ligand-level scores between systems are extracted as in `extract_scores.py`. For each individual score, a graph is created with nodes as systems and edges between systems with a score above a given threshold (see `graph_clustering.py`). Connected components are extracted from these graphs for each system.
 
-A Foldseek search is run on all PDB chains (parameters in `run_foldseek.sh`), and the alignments and per-residue lDDT scores are saved.
+## Pairing structures
+Systems are paired to cross-docking cases, apo chains and predicted chains as described below. For all three similarity scores between the system and the linked structures are available at the protein and pocket level.
 
-The following scores are defined (see `extract_scores.py`):
-- Protein similarity
-    - protein_lddt: lDDT score
-    - protein_lddt_qcov: lDDT x query coverage
-    - protein_fident: sequence identity
-    - protein_qcov: query coverage
-- Pocket similarity
-    - pocket_qcov: Fraction of shared and aligned pocket residues
-    - pocket_fident: Fraction of shared, aligned and identical pocket residues
-    - pocket_lddt_qcov: Average lDDT of shared and aligned pocket residues
-    - pocket_lddt: Average lDDT of query pocket residues
-- PLI similarity
-![PLI similarity](./figures/pli_similarity.png)
+### Cross-docking
+For each system, all systems from a different PDB ID which have (`protein_fident_qcov_foldseek_weighted_sum` or `protein_fident_qcov_mmseqs_weighted_sum` > 98%) and (`pocket_fident_foldseek_weighted_sum` or `pocket_fident_mmseqs_weighted_sum` > 98%) are collected as candidates for cross-docking.
 
-For pockets with >1 protein chain and/or >1 ligand chain, greedy chain mapping is performed using the protein_lddt_qcov for protein chain mapping and the pocket_lddt_qcov for ligand chain mapping. Scores are combined by taking a length-weighted average of the scores for each chain pair, with protein chain length used for protein scores and number of pocket residues used for pocket scores.
+### Apo structures
+All PDB protein chains not participating in a pocket containing a ligand with >=5 rotatable bonds are considered as apo chains. Each system consisting of a single interacting protien chain is linked where possible to apo chains which have `protein_fident_qcov_mmseqs_weighted_sum` >98%. 
 
-### Clustering
+### Predicted structures
+An Mmseqs search is run for all system chains against all UniRef50 members with an AFDB structure of the UniProt IDs associated with each holo chain with `--min-seq-id 0.98 -c 0.9`. Each system consisting of a single interacting protein chain is linked where possible to predicted structures which have `protein_fident_qcov_mmseqs_weighted_sum` >98%.
 
-For each individual score, a graph is created with nodes as pockets and edges between pockets with a score above a given threshold. This is performed for thresholds of [0.5, 0.7, 0.99] for each score (see `label_protein_pocket_clusters` in `graph_clustering.py`). Connected components are extracted from these graphs and the component ID is added as a column to the dataframe.
+## Authors
+Janani Durairaj
+Xavier Robin
 
-### Columns in the dataframe
-
-See `test.tsv` for an example.
-```
-# Pocket merging:
-pocket_ID
-single_pocket_ID			
-Pocket_Number	
-Pocket_Name	
-num_ligands_in_pocket		
-ligand_mmcif_chain	
-Ligand	
-PDB_chain	
-PDB_ID				
-biounit
-joint_pocket_ID	
-
-# Pocket related:
-prox_chains	
-num_prox_chains	
-prox_residues	
-center_of_mass
-has_pocket
-
-# Validation related:
-validation_pocket_ID	
-rscc	
-rsr	
-avgoccu	
-altcode	
-prox_alternative_configuration_residues_flag	
-entry_resolution	
-entry_rfree	
-entry_r	
-entry_clashscore	
-entry_percent_rama_outliers	
-entry_mean_b_factor	
-entry_median_b_factor	
-ligand_num_clashes	
-entry_r_minus_rfree	
-ccd_NumRotatableBonds	
-perc_prox_rscc	
-iridium_pass	
-pass
-has_validation
-
-# PLIP related:
-plip_pocket_ID	
-ligtype
-hash
-prox_plip_residues
-prox_plip_chains	
-prox_plip_ligand_chains	
-num_prox_plip_chains	
-num_prox_plip_residues
-num_plip_interactions	
-num_unique_plip_interactions
-has_plip		
-
-# Ligand related:
-ligand_type	
-is_biolip_artifact	
-is_artifact	
-is_ion
-
-# PDB entry related:
-method	
-oligo_state	
-transmembrane	
-resolution	
-date	
-year
-protein_chain_lengths
-
-# UniProt related:
-UniProt_IDs	
-num_uniprot_ids	
-num_pdbs_for_uniprots	
-
-# Component identifiers
-protein_qcov__0.5__component	protein_qcov__0.7__component	protein_qcov__0.99__component	
-protein_fident__0.5__component	protein_fident__0.7__component	protein_fident__0.99__component	
-protein_lddt__0.5__component	protein_lddt__0.7__component	protein_lddt__0.99__component	
-protein_lddt_qcov__0.5__component	protein_lddt_qcov__0.7__component	protein_lddt_qcov__0.99__component	
-
-pocket_fident__0.5__component	pocket_fident__0.7__component	pocket_fident__0.99__component
-pocket_lddt__0.5__component	pocket_lddt__0.7__component	pocket_lddt__0.99__component	
-pocket_qcov__0.5__component	pocket_qcov__0.7__component	pocket_qcov__0.99__component	
-pocket_lddt_shared__0.5__component	pocket_lddt_shared__0.7__component	pocket_lddt_shared__0.99__component	
-
-plip_weighted_jaccard_nothreeletter__0.25__component	plip_weighted_jaccard_nothreeletter__0.5__component	plip_weighted_jaccard_nothreeletter__0.7__component	plip_weighted_jaccard_nothreeletter__0.99__component
-plip_weighted_jaccard_nothreeletterhydrophobic__0.25__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.5__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.7__component	plip_weighted_jaccard_nothreeletterhydrophobic__0.99__component
-plip_weighted_jaccard_nowater__0.25__component	plip_weighted_jaccard_nowater__0.5__component	plip_weighted_jaccard_nowater__0.7__component	plip_weighted_jaccard_nowater__0.99__component
-plip_weighted_jaccard__0.25__component	plip_weighted_jaccard__0.5__component	plip_weighted_jaccard__0.7__component	plip_weighted_jaccard__0.99__component
-
-plip_jaccard_nothreeletter__0.25__component	plip_jaccard_nothreeletter__0.5__component	plip_jaccard_nothreeletter__0.7__component	plip_jaccard_nothreeletter__0.99__component	
-plip_jaccard_nothreeletterhydrophobic__0.25__component	plip_jaccard_nothreeletterhydrophobic__0.5__component	plip_jaccard_nothreeletterhydrophobic__0.7__component	plip_jaccard_nothreeletterhydrophobic__0.99__component
-plip_jaccard_nowater__0.25__component	plip_jaccard_nowater__0.5__component	plip_jaccard_nowater__0.7__component	plip_jaccard_nowater__0.99__component	
-plip_jaccard__0.25__component	plip_jaccard__0.5__component	plip_jaccard__0.7__component	plip_jaccard__0.99__component	
-```
+This resource is developed by the Computational Structural Biology Group at the SIB Swiss Institute of Bioinformatics and the Biozentrum of the University of Basel. All copyrightable parts of this resource are available under a Creative Commons Attribution-ShareAlike 4.0 International License (see `LICENSE`)
