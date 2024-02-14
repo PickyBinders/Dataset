@@ -267,6 +267,25 @@ def get_smtl_info(pdb_id, smtl_dir):
                     entry_is_transmembrane=annotation.get("membrane", {}).get("is_transmem", None)))
     return data
 
+def get_sifts_mappings(pdb_id, pdb_nextgen_dir):
+    from mmcif.io.PdbxReader import PdbxReader
+    per_chain = defaultdict(set)
+    cif_file = pdb_nextgen_dir / pdb_id.lower()[1:3] / f"pdb_0000{pdb_id.lower()}" / f"pdb_0000{pdb_id.lower()}_xyz-enrich.cif.gz"
+    try:
+        with gzip.open(str(cif_file), 'rt', encoding='utf-8') as f:
+            data = []
+            prd = PdbxReader(f)
+            prd.read(data)
+        xref = data[0].getObj('pdbx_sifts_xref_db_segments')
+        if xref is not None:
+            for a in xref:
+                if a[2] == "?":
+                    continue
+                per_chain[(pdb_id, a[1])].add(f'{a[2]}__{a[3]}')
+    except Exception as e:
+        pass
+    return per_chain
+
 def get_covalent_info(pdb_id, pdb_dir):
     from mmcif.io.PdbxReader import PdbxReader
     cif_file = Path(pdb_dir) / pdb_id[1:3].lower() / f"{pdb_id.lower()}.cif.gz"
@@ -376,6 +395,7 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
         df.rename(columns={"PocketID": "validation_pocket_ID", "ligand_mmcif_chain": "validation_ligand_chain"}, inplace=True)
         df["validation_ligand_chain"] = df["validation_ligand_chain"].apply(lambda x: "NA" if str(x) == "nan" else x)
         df["joint_pocket_ID"] = df["entry_pdb_id"] + "_" + df["ligand_ccd_code"] + "_" + df["validation_ligand_chain"]
+        df = df[df["altcode"].isin([" ", "A"])]
         df = pnd.merge(df, plip_df, 
                     on=['joint_pocket_ID', "entry_pdb_id", "ligand_ccd_code"], 
                     how='outer')
@@ -435,8 +455,8 @@ def main():
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
     parser.add_argument("smtl_dir", type=str, help="Directory with SMTL files")
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
-    parser.add_argument("--max_protein_chains", type=int, default=26, help="Maximum number of protein chains to consider")
-    parser.add_argument("--max_ligand_chains", type=int, default=36, help="Maximum number of ligand chains to consider")
+    parser.add_argument("--max_protein_chains", type=int, default=10, help="Maximum number of protein chains to consider")
+    parser.add_argument("--max_ligand_chains", type=int, default=10, help="Maximum number of ligand chains to consider")
     parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
     args = parser.parse_args()
