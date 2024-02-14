@@ -15,7 +15,7 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
     """
     cifs_dir = Path(cif_dir)
     data = dict(dates=dict(), pockets=dict(), uniprot_ids=dict(), 
-                chain_mapping=dict(), lengths=dict(), 
+                chain_mapping=dict(), lengths=dict(), label_chain_mapping=dict(),
                 entity_mapping=dict(), instance_starts=dict())
     for cif_file in tqdm(cifs_dir.iterdir()):
         try:
@@ -29,8 +29,10 @@ def extract_cif_data(cif_dir, out_file, ignore, threshold=6):
         data["dates"][entry_id] = info.revisions.GetDateOriginal()
         data["lengths"][entry_id] = {x.name: len(x.string) for x in seqres}
         author_chain_mapping = {chain.GetStringProp("pdb_auth_chain_name"): chain.name for chain in plc.chains if chain.type == mol.CHAINTYPE_POLY_PEPTIDE_L}
+        label_chain_mapping = {chain.name: chain.GetStringProp("pdb_auth_chain_name") for chain in plc.chains}
         if len(author_chain_mapping):
             data["chain_mapping"][entry_id] = author_chain_mapping
+        data["label_chain_mapping"][entry_id] = label_chain_mapping
         data["entity_mapping"][entry_id] = {c.GetName(): info.GetMMCifEntityIdTr(c.GetName()) for c in plc.chains}
         for struct_ref in info.struct_refs:
             if struct_ref.db_name == "UNP":
