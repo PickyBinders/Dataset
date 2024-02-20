@@ -45,13 +45,13 @@ def load_alignments(source_to_aln_file, chain_mapping, midfix=None, target_has_c
                     data[q_entry][t_entry][q_chain_mapped] = dict()
                 if t_chain_mapped not in data[q_entry][t_entry][q_chain_mapped]:
                     data[q_entry][t_entry][q_chain_mapped][t_chain_mapped] = dict()
-                lddtfull = ["nan"] * len(parts['qaln'])
+                lddtfull = [0] * len(parts['qaln'])
                 if source == "foldseek":
                     aln_index = 0
                     lddtaln= parts['lddtfull'].split(",")
                     for x, (q_a, t_a) in enumerate(zip(parts['qaln'], parts['taln'])):
                         if q_a != "-" and t_a != "-":
-                            lddtfull[x] = lddtaln[aln_index]
+                            lddtfull[x] = float(lddtaln[aln_index])
                             aln_index += 1
                 parts['lddtfull'] = lddtfull
                 parts["qaln"] = parts["qaln"].upper()
@@ -199,15 +199,13 @@ class PLCScorer:
                     q_a, t_a, lddt = aln[source]['qaln'][i], aln[source]['taln'][i], aln[source]['lddtfull'][i]
                     q_n = self.get_pocket_resnum(source, q_i, q_single_pocket, q_chain)
                     if q_n is not None:
-                        if lddt != "nan":
-                            pocket_scores[f"pocket_lddt_{source}"] += float(lddt)
+                        pocket_scores[f"pocket_lddt_{source}"] += lddt
                         if q_a == t_a:
                             pocket_scores[f"pocket_fident_{source}"] += 1
                         t_n = self.get_pocket_resnum(source, t_i, t_single_pocket, t_chain)
                         if t_n is not None:
                             pocket_scores[f"pocket_qcov_{source}"] += 1
-                            if lddt != "nan":
-                                pocket_scores[f"pocket_lddt_qcov_{source}"] += float(lddt)
+                            pocket_scores[f"pocket_lddt_qcov_{source}"] += lddt
                             if q_a == t_a:
                                 pocket_scores[f"pocket_fident_qcov_{source}"] += 1
                             for plip_suffix in PLIP_SUFFIXES:
@@ -358,8 +356,7 @@ class PLCScorer:
                     q_a, t_a, lddt = aln[source]['qaln'][i], aln[source]['taln'][i], aln[source]['lddtfull'][i]
                     q_n = self.get_pocket_resnum(source, q_i, q_single_pocket, q_chain)
                     if q_n is not None:
-                        if lddt != "nan":
-                            pocket_scores[f"pocket_lddt_{source}"] += float(lddt)
+                        pocket_scores[f"pocket_lddt_{source}"] += lddt
                         if q_a == t_a:
                             pocket_scores[f"pocket_fident_{source}"] += 1
                     if t_a != "-":
