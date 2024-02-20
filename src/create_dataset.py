@@ -9,6 +9,7 @@ import json
 from rdkit import Chem
 from rdkit import RDLogger
 import gzip
+from mmcif.io.PdbxReader import PdbxReader
 
 VALIDATION_COLUMNS = [
  'rscc',
@@ -171,7 +172,7 @@ def label_ligand_types(df, parsed_components, cofactor_file):
 
 def load_cif_data(cif_data_dir, names_to_load=None):
     if names_to_load is None:
-        names_to_load = ["dates", "pockets", "uniprot_ids", "chain_mapping", "lengths", "entity_mapping"]
+        names_to_load = ["dates", "pockets", "uniprot_ids", "chain_mapping", "lengths", "entity_mapping", "label_chain_mapping"]
     cif_data = {x: dict() for x in names_to_load}
     for cif_data_file in tqdm(Path(cif_data_dir).iterdir()):
         with open(cif_data_file) as f:
@@ -186,8 +187,7 @@ def get_uniprot_to_chains(chain_to_uniprots):
         uniprot_to_chains[uniprot].add(chain)
     return uniprot_to_chains
 
-def annotate_chains_and_residues(df, cif_data_dir):
-    cif_data = load_cif_data(cif_data_dir)
+def annotate_chains_and_residues(df, cif_data):
     df["ligand_interacting_protein_chains_count"] = df["ligand_interacting_protein_chains"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
     df["ligand_interacting_protein_chains_string"] = df["ligand_interacting_protein_chains"].apply(lambda x: "_".join(sorted(x)) if str(x) != "nan" else np.nan)
     df["ligand_interacting_residues_count"] = df["ligand_interacting_residues"].apply(lambda x: len(set(x)) if str(x) != "nan" else 0)
@@ -214,11 +214,12 @@ def assign_pocket(df):
     for (pdb_id, biounit), group in tqdm(df.groupby(['entry_pdb_id', 'system_biounit'])):
         pocket_number = 0
         pocket_dict = {}
-        for index, row in group.iterrows():
+        for index, row in group.sort_values('ligand_neighboring_ligand_chains_count', ascending=False).iterrows():
             prox_ligand_chains = row['ligand_neighboring_ligand_chains']
             if prox_ligand_chains is None:
                 prox_ligand_chains = set()
             prox_ligand_chains = set(prox_ligand_chains)
+            prox_ligand_chains.add(row['ligand_chain'])
             assigned = False
             for key, value in pocket_dict.items():
                 if row['ligand_chain'] in value or len(prox_ligand_chains.intersection(value)) > 0:
@@ -250,76 +251,63 @@ def assign_pocket(df):
     df["system_protein_chains_count"] = df["system_number"].apply(lambda x: pocket_to_nums[x][1])
     return df
 
-def get_smtl_info(pdb_id, smtl_dir):
-    smtl_dir = Path(smtl_dir)
-    pdb_id = pdb_id.lower()
-    data = []
-    for annotation_file in (smtl_dir / pdb_id[:2] / pdb_id[2:]).glob("annotation.*.json"):
-        with open(annotation_file) as f:
-            annotation = json.load(f)
-        if annotation["status"] == "deleted":
-            continue
-        if not all(x.isdigit() for x in annotation["mmcif_id"]):
-            continue
-        data.append(dict(entry_pdb_id=pdb_id.upper(), system_biounit=int(annotation["mmcif_id"]), 
-                         entry_determination_method=annotation["method"],
-                    entry_resolution=annotation["resolution"], entry_oligomeric_state=annotation["oligo_state"],
-                    entry_is_transmembrane=annotation.get("membrane", {}).get("is_transmem", None)))
-    return data
-
-def get_sifts_mappings(pdb_id, pdb_nextgen_dir):
-    from mmcif.io.PdbxReader import PdbxReader
+def get_nextgen_mappings(pdb_id, pdb_nextgen_dir):
     per_chain = defaultdict(set)
-    cif_file = pdb_nextgen_dir / pdb_id.lower()[1:3] / f"pdb_0000{pdb_id.lower()}" / f"pdb_0000{pdb_id.lower()}_xyz-enrich.cif.gz"
+    cif_file = Path(pdb_nextgen_dir) / pdb_id.lower()[1:3] / f"pdb_0000{pdb_id.lower()}" / f"pdb_0000{pdb_id.lower()}_xyz-enrich.cif.gz"
+    entry_info = {}
+    covalent_chains = set()
     try:
         with gzip.open(str(cif_file), 'rt', encoding='utf-8') as f:
             data = []
             prd = PdbxReader(f)
             prd.read(data)
-        xref = data[0].getObj('pdbx_sifts_xref_db_segments')
+        data = data[0]
+        entry_info["entry_pdb_id"] = pdb_id
+        mappings = [("entry_oligomeric_state", "pdbx_struct_assembly", "oligomeric_details"),
+                    ("entry_determination_method", "exptl", "method"),
+                    ("entry_keywords", "struct_keywords", "pdbx_keywords"),
+                    ("entry_pH", "exptl_crystal_grow", "pH"),
+                    ("entry_resolution", "refine", "ls_d_res_high")]
+        for key, obj_name, attr_name in mappings:
+            x = data.getObj(obj_name)
+            if x is not None:
+                entry_info[key] = x.getValueOrDefault(attr_name)
+        # SIFTS mapping
+        xref = data.getObj('pdbx_sifts_xref_db_segments')
         if xref is not None:
             for a in xref:
                 if a[2] == "?":
                     continue
                 per_chain[(pdb_id, a[1])].add(f'{a[2]}__{a[3]}')
+        
+        # Label covalent ligands
+        # struct_conn = data.getObj('struct_conn')
+        # if struct_conn is not None:
+        #     for a, b in struct_conn.getCombinationCountsWithConditions(['ptnr1_label_asym_id', 'ptnr2_label_asym_id'],
+        #                                                                               [('conn_type_id', "eq", 'covale')]):
+        #         covalent_chains.add((pdb_id, a))
+        #         covalent_chains.add((pdb_id, b))        
     except Exception as e:
         pass
-    return per_chain
+    return entry_info, per_chain, covalent_chains
 
-def get_covalent_info(pdb_id, pdb_dir):
-    from mmcif.io.PdbxReader import PdbxReader
-    cif_file = Path(pdb_dir) / pdb_id[1:3].lower() / f"{pdb_id.lower()}.cif.gz"
-    if not cif_file.exists():
-        return None
-    with gzip.open(str(cif_file), 'rt', encoding='utf-8') as f:
-        data = []
-        try:
-            prd = PdbxReader(f)
-            prd.read(data)
-        except Exception as e:
-            print(f"Error reading {cif_file}: {e}")
-            return None
-    struct_conn = data[0].getObj('struct_conn')
-    if struct_conn is None:
-        return None
-    covalent_bonds = [index for index in range(struct_conn.getRowCount()) if struct_conn.getValue('conn_type_id', index) == 'covale']
-    if len(covalent_bonds) == 0:
-        return None
-    covalent_ligand_chains = set()
-    for index in covalent_bonds:
-        covalent_ligand_chains.add(struct_conn.getValue('ptnr1_label_asym_id', index))
-        covalent_ligand_chains.add(struct_conn.getValue('ptnr2_label_asym_id', index))
-    return {pdb_id: covalent_ligand_chains}
-
-def label_smtl(df, smtl_dir, num_threads=20):
-    annotations = {}
-    input_args = [(pdb_id, smtl_dir) for pdb_id in df["entry_pdb_id"].unique()]
+def label_nextgen(df, pdb_nextgen_dir, chain_mapping, num_threads=32):
+    input_args = [(pdb_id, pdb_nextgen_dir) for pdb_id in df["entry_pdb_id"].unique()]
+    entry_info_all = defaultdict(dict)
+    all_sifts_mapping = {}
+    # all_covalent_mapping = {}
     with Pool(num_threads) as p:
-        for annotation_list in p.starmap(get_smtl_info, input_args):
-            for annotation in annotation_list:
-                annotations[(annotation["entry_pdb_id"], annotation["system_biounit"])] = annotation
-    for a in ["entry_determination_method", "entry_oligomeric_state", "entry_is_transmembrane", "entry_resolution"]:
-        df[a] = df.apply(lambda row: annotations.get((row["entry_pdb_id"], int(row["system_biounit"])), {}).get(a, np.nan), axis=1)
+        for entry_info, per_chain, covalent_chains in p.starmap(get_nextgen_mappings, input_args):
+            for x in entry_info:
+                if x == "entry_pdb_id":
+                    continue
+                entry_info_all[x][entry_info["entry_pdb_id"]] = entry_info[x]
+            all_sifts_mapping.update(per_chain)
+            # all_covalent_mapping.update(covalent_chains)
+    for a in tqdm(entry_info_all):
+        df[a] = df["entry_pdb_id"].apply(lambda row: entry_info_all[a].get(row, np.nan))    
+    df["ligand_interacting_protein_chains_sifts"] = df.apply(lambda row: [list(all_sifts_mapping.get((row["entry_pdb_id"], chain_mapping[row["entry_pdb_id"]][x.split(".")[-1]]), [])) for x in row["ligand_interacting_protein_chains_string"].split("_")], axis=1)
+    # df["ligand_has_covalent_bond"] = df.apply(lambda row: (row["entry_pdb_id"], row["ligand_chain"].split(".")[-1]) in all_covalent_mapping, axis=1)
     return df
 
 def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
@@ -337,13 +325,12 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
         first_time = set()
         with open(folder / f"{name}.txt" , "w") as f:
             for pdb_id, rows in tqdm(df.groupby("entry_pdb_id")):
-                asym_auth_chain_mapping = {v: k for k, v in chain_mapping.get(pdb_id, {}).items()}
                 pdb_id = pdb_id.lower()
                 chains = set()
                 for _, row in rows.iterrows():
                     chains |= set(row["ligand_interacting_protein_chains"])
                 chains = set(x.split(".")[-1] for x in chains)
-                auth_chains = set(asym_auth_chain_mapping[x] for x in chains if x in asym_auth_chain_mapping)
+                auth_chains = set(chain_mapping[pdb_id][x] for x in chains if x in chain_mapping[pdb_id])
                 for chain in auth_chains:
                     if source == "foldseek":
                         f.write(f"{pdb_id}.cif.gz_{chain}\n")
@@ -363,7 +350,7 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
                             fp.write(f"{pdb_id}_{chain}\n")
 
 def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
-                         smtl_dir, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
+                         pdb_nextgen_dir, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
     from pdbeccdutils.core import ccd_reader
     """
     dataset_dir: directory to save the dataset files
@@ -375,7 +362,7 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     components_file: file with PDB chemical component dictionary
     cofactor_file: file with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)
     artifact_file: file with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)
-    smtl_dir: directory with SMTL files
+    pdb_nextgen_dir: directory with PDB NextGen files
     max_protein_chains: maximum number of protein chains to consider
     max_ligand_chains: maximum number of ligand chains to consider
     num_threads: number of threads to use
@@ -384,7 +371,7 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     dataset_dir = Path(dataset_dir)
     dataset_dir.mkdir(exist_ok=True)
     all_pockets_file = dataset_dir / "all_pockets.csv"
-    
+    cif_data = load_cif_data(cif_data_dir)
     if overwrite or not all_pockets_file.exists():
         plip_df = read_df(plip_file)
         plip_df["plip_ligand_chain"] = plip_df["ligand_chain"].apply(lambda x: x.split(".")[-1])
@@ -404,7 +391,7 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
         df["system_biounit"] = df["system_biounit"].fillna(1)
         df["ligand_system_ID"] = df.apply(lambda row: f'{row["entry_pdb_id"]}__{int(row["system_biounit"])}__{row["ligand_chain"]}', axis=1)
         print("Annotation of chains and residues")
-        df = annotate_chains_and_residues(df, cif_data_dir)
+        df = annotate_chains_and_residues(df, cif_data)
         RDLogger.DisableLog('rdApp.*')
         parsed_components = ccd_reader.read_pdb_components_file(str(components_file))
         print("Labeling ligand types")
@@ -417,6 +404,7 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     df = read_df(all_pockets_file)
     print("Number of pockets after merging PLIP and validation:", len(df), df["ligand_system_ID"].nunique())
     df = df[df["has_plip"] & df["has_pocket"]].reset_index(drop=True)
+    df["ligand_neighboring_ligand_chains_count"] = df["ligand_neighboring_ligand_chains"].apply(lambda x: len(x) if x is not None else 0)
     df = assign_pocket(df)
     print("Number of pockets after filtering for PLIP and binding sites and merging pockets")
     print("\tTotal rows:", len(df))
@@ -436,10 +424,9 @@ def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, valid
     df = df[(df["system_protein_chains_count"] <= max_protein_chains) & (df["system_ligand_chains_count"] <= max_ligand_chains)]
     print("Number of pockets with small molecules (no artifacts, max protein chains, max ligand chains):", df["system_ID"].nunique())
     print("Annotating info from SMTL")
-    df = label_smtl(df, smtl_dir, num_threads=num_threads)
+    df = label_nextgen(df, pdb_nextgen_dir, cif_data["label_chain_mapping"], num_threads=num_threads)
     df.to_csv(dataset_dir / "filtered_pockets.csv", index=False)
-    chain_mapping = load_cif_data(cif_data_dir, names_to_load=["chain_mapping"])["chain_mapping"]
-    make_subset_files(df, Path(foldseek_dir) / "filtered_pockets", Path(mmseqs_dir) / "filtered_pockets", chain_mapping, "filtered_pockets")
+    make_subset_files(df, Path(foldseek_dir) / "filtered_pockets", Path(mmseqs_dir) / "filtered_pockets", cif_data["label_chain_mapping"], "filtered_pockets")
 
 def main():
     import argparse
@@ -453,10 +440,10 @@ def main():
     parser.add_argument("components_file", type=str, help="File with PDB chemical component dictionary")
     parser.add_argument("cofactor_file", type=str, help="File with cofactors (https://www.ebi.ac.uk/pdbe/api/pdb/compound/cofactors)")
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
-    parser.add_argument("smtl_dir", type=str, help="Directory with SMTL files")
+    parser.add_argument("pdb_nextgen_dir", type=str, help="Directory with PDB NextGen files", default=Path("/scicore/data/managed/PDB_NEXTGEN/latest/pdb_nextgen/data/entries/divided/"))
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
-    parser.add_argument("--max_protein_chains", type=int, default=10, help="Maximum number of protein chains to consider")
-    parser.add_argument("--max_ligand_chains", type=int, default=10, help="Maximum number of ligand chains to consider")
+    parser.add_argument("--max_protein_chains", type=int, default=9, help="Maximum number of protein chains to consider")
+    parser.add_argument("--max_ligand_chains", type=int, default=9, help="Maximum number of ligand chains to consider")
     parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
     args = parser.parse_args()
