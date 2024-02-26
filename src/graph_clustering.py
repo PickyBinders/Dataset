@@ -50,14 +50,38 @@ def label_protein_pocket_clusters(score_dir, score_name, thresholds, strong=True
         key_to_component[threshold] = get_connected_components(graph, strong=strong)
     return key_to_component
 
-def label_df(pocket_df, cluster_dir):
+def get_present(args):
+    score_file, score_name = args
+    present = set()
+    with open(score_file) as f:
+        for i, line in enumerate(f):
+            if not len(line):
+                continue
+            if i == 0:
+                columns = line.strip().split("\t")
+                continue
+            parts = dict(zip(columns, line.strip().split("\t")))
+            if parts[score_name] == "nan":
+                continue
+            present.add(parts["query_pocket"])
+    return present
+
+def label_present(score_dir, score_name, num_threads=8):
+    present = set()
+    with Pool(num_threads) as p:
+        for present_set in tqdm(p.imap(get_present, [(score_file, score_name) for score_file in score_dir.iterdir()]), total=1060):
+            present |= present_set
+    return present
+
+def label_df(pocket_df, cluster_dir, num_threads=8):
     for cluster_file in tqdm(Path(cluster_dir).iterdir()):
         with open(cluster_file) as f:
             key_to_component = json.load(f)
         score_name, strong = cluster_file.stem.split("__")
+        present = label_present(cluster_dir, score_name, num_threads=num_threads)
+        pocket_df[f"{score_name}__no_hit"] = pocket_df["system_ID"].apply(lambda x: x not in present)
         for key in key_to_component:
             col = f"{score_name}__{key}__{strong}__component"
-            pocket_df[f"{col}__not_found"] = pocket_df["system_ID"].apply(lambda x: x not in key_to_component[key])
             pocket_df[col] = pocket_df["system_ID"].apply(lambda x: key_to_component[key].get(x, None))
             max_component = int(pocket_df[col].max()) + 1
             pocket_df.loc[pocket_df[col].isnull(), col] = [int(max_component) + i for i in range(len(pocket_df[pocket_df[col].isnull()]))]
