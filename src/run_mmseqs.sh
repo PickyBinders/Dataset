@@ -21,6 +21,7 @@ mmseqs createdb /scicore/data/managed/PDB/latest/derived_data/pdb_seqres.txt "$P
 mmseqs createindex "$PDB_DIR" tmp_mmseqs
 awk 'NR == FNR {f[\$1] = \$1; next} \$2 in f {print \$1}' "$POCKET_DIR/$OUTPUT_NAME".txt "$PDB_DIR".lookup > "$POCKET_DIR/$OUTPUT_NAME".tsv
 mmseqs createsubdb "$POCKET_DIR/$OUTPUT_NAME".tsv "$PDB_DIR" "$POCKET_DIR/$OUTPUT_NAME" 
+mmseqs createsubdb "$POCKET_DIR/$OUTPUT_NAME".tsv "$PDB_DIR"_h "$POCKET_DIR/$OUTPUT_NAME"_h
 EOF
 )
 
