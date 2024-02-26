@@ -281,13 +281,13 @@ def get_nextgen_mappings(pdb_id, pdb_nextgen_dir):
                 per_chain[(pdb_id, a[1])].add(f'{a[2]}__{a[3]}')
         
         # Label covalent ligands
-        # struct_conn = data.getObj('struct_conn')
-        # if struct_conn is not None:
-        #     for a, b in struct_conn.getCombinationCountsWithConditions(['ptnr1_label_asym_id', 'ptnr2_label_asym_id'],
-        #                                                                               [('conn_type_id', "eq", 'covale')]):
-        #         covalent_chains.add((pdb_id, a))
-        #         covalent_chains.add((pdb_id, b))        
-    except Exception as e:
+        struct_conn = data.getObj('struct_conn')
+        if struct_conn is not None:
+            for a, b in struct_conn.getCombinationCountsWithConditions(['ptnr1_label_asym_id', 'ptnr2_label_asym_id'],
+                                                                                      [('conn_type_id', "eq", 'covale')]):
+                covalent_chains.add((pdb_id, a))
+                covalent_chains.add((pdb_id, b))        
+    except Exception:
         pass
     return entry_info, per_chain, covalent_chains
 
@@ -295,7 +295,7 @@ def label_nextgen(df, pdb_nextgen_dir, chain_mapping, num_threads=32):
     input_args = [(pdb_id, pdb_nextgen_dir) for pdb_id in df["entry_pdb_id"].unique()]
     entry_info_all = defaultdict(dict)
     all_sifts_mapping = {}
-    # all_covalent_mapping = {}
+    all_covalent_mapping = set()
     with Pool(num_threads) as p:
         for entry_info, per_chain, covalent_chains in p.starmap(get_nextgen_mappings, input_args):
             for x in entry_info:
@@ -303,11 +303,11 @@ def label_nextgen(df, pdb_nextgen_dir, chain_mapping, num_threads=32):
                     continue
                 entry_info_all[x][entry_info["entry_pdb_id"]] = entry_info[x]
             all_sifts_mapping.update(per_chain)
-            # all_covalent_mapping.update(covalent_chains)
+            all_covalent_mapping.update(covalent_chains)
     for a in tqdm(entry_info_all):
         df[a] = df["entry_pdb_id"].apply(lambda row: entry_info_all[a].get(row, np.nan))    
     df["ligand_interacting_protein_chains_sifts"] = df.apply(lambda row: [list(all_sifts_mapping.get((row["entry_pdb_id"], chain_mapping[row["entry_pdb_id"]][x.split(".")[-1]]), [])) for x in row["ligand_interacting_protein_chains_string"].split("_")], axis=1)
-    # df["ligand_has_covalent_bond"] = df.apply(lambda row: (row["entry_pdb_id"], row["ligand_chain"].split(".")[-1]) in all_covalent_mapping, axis=1)
+    df["ligand_has_covalent_bond"] = df.apply(lambda row: (row["entry_pdb_id"], row["ligand_chain"].split(".")[-1]) in all_covalent_mapping, axis=1)
     return df
 
 def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
@@ -325,7 +325,6 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
         first_time = set()
         with open(folder / f"{name}.txt" , "w") as f:
             for pdb_id, rows in tqdm(df.groupby("entry_pdb_id")):
-                pdb_id = pdb_id.lower()
                 chains = set()
                 for _, row in rows.iterrows():
                     chains |= set(row["ligand_interacting_protein_chains"])
@@ -333,10 +332,10 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
                 auth_chains = set(chain_mapping[pdb_id][x] for x in chains if x in chain_mapping[pdb_id])
                 for chain in auth_chains:
                     if source == "foldseek":
-                        f.write(f"{pdb_id}.cif.gz_{chain}\n")
+                        f.write(f"{pdb_id.lower()}.cif.gz_{chain}\n")
                     else:
-                        f.write(f"{pdb_id}_{chain}\n")
-                prefix = pdb_id[1:3]
+                        f.write(f"{pdb_id.lower()}_{chain}\n")
+                prefix = pdb_id[1:3].lower()
                 if prefix not in first_time:
                     first_time.add(prefix)
                     open_mode = "w"
@@ -345,9 +344,9 @@ def make_subset_files(df, foldseek_folder, mmseqs_folder, chain_mapping, name):
                 with open(subset_folder / f"{prefix}.txt", open_mode) as fp:
                     for chain in auth_chains:
                         if source == "foldseek":
-                            fp.write(f"{pdb_id}.cif.gz_{chain}\n")
+                            fp.write(f"{pdb_id.lower()}.cif.gz_{chain}\n")
                         else:
-                            fp.write(f"{pdb_id}_{chain}\n")
+                            fp.write(f"{pdb_id.lower()}_{chain}\n")
 
 def create_dataset_files(dataset_dir, foldseek_dir, mmseqs_dir, plip_file, validation_file, cif_data_dir, components_file, cofactor_file, artifact_file, 
                          pdb_nextgen_dir, num_threads=20, max_protein_chains=10, max_ligand_chains=5, overwrite=False):
@@ -442,8 +441,8 @@ def main():
     parser.add_argument("artifact_file", type=str, help="File with artifacts (https://github.com/kad-ecoli/mmCIF2BioLiP/blob/dc9769f286eafc550f799239486ef64450728246/ligand_list)")
     parser.add_argument("pdb_nextgen_dir", type=str, help="Directory with PDB NextGen files", default=Path("/scicore/data/managed/PDB_NEXTGEN/latest/pdb_nextgen/data/entries/divided/"))
     parser.add_argument("--num_threads", type=int, default=20, help="Number of threads to use")
-    parser.add_argument("--max_protein_chains", type=int, default=9, help="Maximum number of protein chains to consider")
-    parser.add_argument("--max_ligand_chains", type=int, default=9, help="Maximum number of ligand chains to consider")
+    parser.add_argument("--max_protein_chains", type=int, default=5, help="Maximum number of protein chains to consider")
+    parser.add_argument("--max_ligand_chains", type=int, default=5, help="Maximum number of ligand chains to consider")
     parser.add_argument("--overwrite", action="store_true", help="Whether to overwrite existing files")
 
     args = parser.parse_args()
