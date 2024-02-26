@@ -6,12 +6,39 @@ from dataclasses import dataclass
 import typing as ty
 from create_dataset import read_df, load_cif_data
 from extract_plip_data import PLIPHash
+import pandas as pnd
 
 PLIP_SUFFIXES = ["", "_nowater"]
 INFO_COLUMNS = ["query_pocket", "target_pocket", "protein_mapping", "ligand_mapping"]
 SCORE_NAMES = ["protein_lddt", "protein_lddt_qcov", "protein_qcov", "protein_fident", "protein_fident_qcov",
                "pocket_lddt", "pocket_lddt_qcov", "pocket_qcov", "pocket_fident", "pocket_fident_qcov"] + \
-                [f"pli_qcov{x}" for x in PLIP_SUFFIXES]
+                [f"pli_qcov{x}" for x in PLIP_SUFFIXES] + ["ligand_tanimoto_similarity_pocket"]
+WEIGHT_TYPES = ["max", "weighted_max", "weighted_sum"]
+
+
+def combine_scores(q_t_scores):
+    q_t_scores_combined = {}
+    for s in SCORE_NAMES:
+        if s.startswith("ligand"):
+            continue
+        for suffix in ["_weighted_max", "_weighted_sum"]:
+            if f"{s}_foldseek{suffix}" not in q_t_scores and f"{s}_mmseqs{suffix}" not in q_t_scores:
+                continue
+            s1, s2 = q_t_scores.get(f"{s}_foldseek{suffix}", 0), q_t_scores.get(f"{s}_mmseqs{suffix}", 0)
+            source = "foldseek"
+            if np.allclose(s1, s2):
+                q_t_scores_combined[f"{s}{suffix}"] = s1
+                q_t_scores_combined[f"{s}{suffix}_source"] = "both"
+            else:
+                index = np.argmax([s1, s2])
+                q_t_scores_combined[f"{s}{suffix}"] = [s1, s2][index]
+                source = ["foldseek", "mmseqs"][index]
+                q_t_scores_combined[f"{s}{suffix}_source"] = source
+            if not suffix == "_weighted_sum":
+                n = f'{s}_{source}{suffix}_mapping'
+                if n in q_t_scores:
+                    q_t_scores_combined[f"{s}{suffix}_mapping"] = q_t_scores[n]
+    return q_t_scores_combined
 
 def load_alignments(source_to_aln_file, chain_mapping, midfix=None, target_has_chain=True):
     data = defaultdict(dict)
@@ -66,9 +93,17 @@ class PLCScorer:
     pocket_residues: ty.Dict[str, ty.DefaultDict[str, ty.Dict[int, int]]]
     protein_chain_lengths: ty.Dict[str, ty.Dict[str, int]]
     chain_mapping: ty.Dict[str, ty.Dict[str, str]]
+    ligand_to_index: ty.Dict[str, int]
+    ligand_to_length: ty.Dict[str, int]
+    ligand_similarity_matrix: np.ndarray
 
     @classmethod
-    def initialise(cls, df_file, cif_data_dir):
+    def initialise(cls, df_file, cif_data_dir, ligand_index_file, ligand_matrix_file, ligand_lengths_file):
+        ligand_to_index = pnd.read_csv(ligand_index_file)
+        ligand_to_index = dict(zip(ligand_to_index["Ligand"], ligand_to_index.index))
+        ligand_to_length = pnd.read_csv(ligand_lengths_file)
+        ligand_to_length = dict(zip(ligand_to_length["Ligand"], ligand_to_length["n_ro_bonds"]))
+        ligand_similarity_matrix = np.load(ligand_matrix_file)
         cif_data = load_cif_data(cif_data_dir, names_to_load=["pockets", "chain_mapping"])
         df = read_df(df_file)
         df = df[(df["system_ligand_chains_count"] < 10) & (df["system_protein_chains_count"] < 10)].reset_index(drop=True)
@@ -106,7 +141,7 @@ class PLCScorer:
                 if length == "nan":
                     continue
                 protein_chain_lengths[entry][chain] = int(length)
-        return cls(entry_to_pockets, pocket_to_hash, pocket_residues, protein_chain_lengths, cif_data["chain_mapping"])
+        return cls(entry_to_pockets, pocket_to_hash, pocket_residues, protein_chain_lengths, cif_data["chain_mapping"], ligand_to_index, ligand_to_length, ligand_similarity_matrix)
     
     def get_protein_scores_pair(self, aln):
         scores = {}
@@ -293,12 +328,39 @@ class PLCScorer:
             if score.endswith("_weighted_sum") and q_pli_lengths[plip_suffix] > 0:
                 pli_scores[score] /= q_pli_lengths[plip_suffix]
         return pocket_mappings, pocket_scores, pli_mappings, pli_scores, ligand_chain_mapper
-    
 
-    def get_scores(self, q_entry, q_alignments):
+    def get_ligand_scores(self, mapping, q_ligand_length):
+        score_name="ligand_tanimoto_similarity_pocket"
+        ligand_scores = defaultdict(float)
+        ligand_mappings = defaultdict(list)
+        max_ligand_lengths = defaultdict(float)
+
+        for (q_ligand, q_ligand_chain), (t_ligand, t_ligand_chain) in mapping:
+            if q_ligand not in self.ligand_to_index or t_ligand not in self.ligand_to_index or q_ligand not in self.ligand_to_length or t_ligand not in self.ligand_to_length:
+                continue
+            ligand_pair_score = self.ligand_similarity_matrix[self.ligand_to_index[q_ligand], self.ligand_to_index[t_ligand]] * self.ligand_to_length[q_ligand]
+            if ligand_pair_score > ligand_scores[f"{score_name}_weighted_max"]:
+                ligand_scores[f"{score_name}_weighted_max"] = ligand_pair_score
+                max_ligand_lengths[f"{score_name}_weighted_max"] = self.ligand_to_length[q_ligand]
+                ligand_mappings[f"{score_name}_weighted_max"] = [(q_ligand_chain, t_ligand_chain)]
+                normalized_score = ligand_pair_score / self.ligand_to_length[q_ligand]
+                if normalized_score > ligand_scores[f"{score_name}_max"]:
+                    ligand_scores[f"{score_name}_pocket_max"] = normalized_score
+                    ligand_mappings[f"{score_name}_pocket_max"] = [(q_ligand_chain, t_ligand_chain)]
+            ligand_scores[f"{score_name}_weighted_sum"] += ligand_pair_score
+        ligand_mappings[f"{score_name}_weighted_sum"] = [(q_ligand_chain, t_ligand_chain) for (_, q_ligand_chain), (_, t_ligand_chain) in mapping]
+        
+        if max_ligand_lengths[f"{score_name}_weighted_max"] > 0:
+            ligand_scores[f"{score_name}_weighted_max"] /= max_ligand_lengths[f"{score_name}_weighted_max"]
+        if q_ligand_length > 0:
+            ligand_scores[f"{score_name}_weighted_sum"] /= q_ligand_length
+        return ligand_mappings, ligand_scores
+
+    def get_scores(self, q_entry, q_alignments, suffixes):
         for q_pocket in self.entry_to_pockets[q_entry]:
             q_entry, q_biounit, q_chains, q_ligand_chains, q_ligands = q_pocket.split("__")
-            q_chains, q_ligand_chains, q_ligands= q_chains.split("_"), q_ligand_chains.split("_"), q_ligands.split("_")
+            q_chains, q_ligand_chains, q_ligands = q_chains.split("_"), q_ligand_chains.split("_"), q_ligands.split("_")
+            q_ligand_chain_to_ligand = dict(zip(q_ligand_chains, q_ligands))
             q_length = sum(self.protein_chain_lengths[q_entry].get(q_chain, 0) for q_chain in q_chains)
             q_single_pockets = [f"{q_entry}__{q_biounit}__{q_ligand_chain}" for q_ligand_chain in q_ligand_chains if f"{q_entry}__{q_biounit}__{q_ligand_chain}" in self.pocket_residues]
             q_pocket_length = sum(len(b) for q_single_pocket in q_single_pockets for b in self.pocket_residues[q_single_pocket].values())
@@ -306,45 +368,86 @@ class PLCScorer:
             for plip_suffix in PLIP_SUFFIXES:
                 for q_single_pocket in q_single_pockets:
                     q_pli_lengths[plip_suffix] += sum(sum(self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain][q_res].values()) for q_chain in self.pocket_to_hash[plip_suffix][q_single_pocket] for q_res in self.pocket_to_hash[plip_suffix][q_single_pocket][q_chain])
-        
+            q_ligand_length = sum(self.ligand_to_length.get(q_ligand, 0) for q_ligand in q_ligands)
             for t_entry in q_alignments:
-                if any(q_chain.split(".")[-1] in q_alignments[t_entry] for q_chain in q_chains):
-                    if t_entry not in self.entry_to_pockets:
+                if all(q_chain.split(".")[-1] not in q_alignments[t_entry] for q_chain in q_chains):
+                    continue
+                all_t_chains = set()
+                for q_chain in q_chains:
+                    q = q_chain.split(".")[-1]
+                    if q in q_alignments[t_entry]:
+                        all_t_chains.update(q_alignments[t_entry][q].keys())
+                if t_entry not in self.entry_to_pockets:
+                    continue
+                for t_pocket in self.entry_to_pockets[t_entry]:
+                    if t_pocket == q_pocket:
                         continue
-                    for t_pocket in self.entry_to_pockets[t_entry]:
-                        if t_pocket == q_pocket:
-                            continue
+                    
+                    t_entry, t_biounit, t_chains, t_ligand_chains, t_ligands = t_pocket.split("__")
+                    t_chains, t_ligand_chains, t_ligands = t_chains.split("_"), t_ligand_chains.split("_"), t_ligands.split("_")
+                    if all(t_chain.split(".")[-1] not in all_t_chains for t_chain in t_chains):
+                        continue
+                    t_ligand_chain_to_ligand = dict(zip(t_ligand_chains, t_ligands))
+                    q_t_scores = {}
+
+                    # Protein score calculation
+                    protein_mappings, protein_scores, alns, protein_chain_mapper = self.get_protein_scores(q_alignments, q_entry, q_chains, t_entry, t_chains, q_length)
+                    q_t_scores.update(protein_scores)
+                    
+                    # Pocket and PLI score calculation
+                    t_single_pockets = [f"{t_entry}__{t_biounit}__{t_ligand_chain}" for t_ligand_chain in t_ligand_chains if f"{t_entry}__{t_biounit}__{t_ligand_chain}" in self.pocket_residues]
+                    pocket_mappings, pocket_scores, pli_mappings, pli_scores, ligand_chain_mapper = self.get_pocket_pli_scores(alns, q_single_pockets, t_single_pockets, q_pocket_length, q_pli_lengths)
+                    q_t_scores.update(pocket_scores)
+                    q_t_scores.update(pli_scores)
                         
-                        t_entry, t_biounit, t_chains, t_ligand_chains, t_ligands = t_pocket.split("__")
-                        t_chains, t_ligand_chains, t_ligands = t_chains.split("_"), t_ligand_chains.split("_"), t_ligands.split("_")
+                    # Mapping info
+                    for mapping in protein_mappings:
+                        q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_chain}:{t_chain}" for q_chain, t_chain in protein_mappings[mapping])
+                    for mapping in pocket_mappings:
+                        q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_ligand_chain.split('__')[-1]}:{t_ligand_chain.split('__')[-1]}" for q_ligand_chain, t_ligand_chain in pocket_mappings[mapping])
+                    for mapping in pli_mappings:
+                        q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_ligand_chain.split('__')[-1]}:{t_ligand_chain.split('__')[-1]}" for q_ligand_chain, t_ligand_chain in pli_mappings[mapping])
+                    q_t_scores = combine_scores(q_t_scores)
+                    if protein_chain_mapper is not None:
+                        q_t_scores["protein_mapper"] = "foldseek" if "lddt" in protein_chain_mapper else "mmseqs"
+                    if ligand_chain_mapper is not None:
+                        q_t_scores["ligand_mapper"] = "foldseek" if "lddt" in ligand_chain_mapper else "mmseqs"
+                    q_t_scores["protein_mapping"] = ",".join(f"{q_chain}:{t_chain}" for q_chain, t_chain in protein_mappings[f"{protein_chain_mapper}_weighted_sum"])
+                    q_t_scores["ligand_mapping"] = ",".join(f"{q_ligand_chain.split('__')[-1]}:{t_ligand_chain.split('__')[-1]}" for q_ligand_chain, t_ligand_chain in pocket_mappings[f"{ligand_chain_mapper}_weighted_sum"])
+                    
+                    # Ligand score calculation
+                    ligand_mapping_from_pocket = [(q_ligand_chain.split('__')[-1], t_ligand_chain.split('__')[-1]) for q_ligand_chain, t_ligand_chain in pocket_mappings[f"{ligand_chain_mapper}_weighted_sum"]]
+                    ligand_mapping_from_pocket = [((q_ligand_chain_to_ligand[q_ligand_chain], q_ligand_chain), (t_ligand_chain_to_ligand[t_ligand_chain], t_ligand_chain)) for q_ligand_chain, t_ligand_chain in ligand_mapping_from_pocket]
+                    ligand_mappings, ligand_scores = self.get_ligand_scores(ligand_mapping_from_pocket, q_ligand_length)
+                    q_t_scores.update(ligand_scores)
+                    for mapping in ligand_mappings:
+                        q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_ligand_chain}:{t_ligand_chain}" for q_ligand_chain, t_ligand_chain in ligand_mappings[mapping])
+                    
+                    q_t_scores["target_pocket"] = t_pocket
+                    q_t_scores["query_pocket"] = q_pocket
+                    yield q_t_scores
 
-                        q_t_scores = {}
-
-                        # Protein score calculation
-                        protein_mappings, protein_scores, alns, protein_chain_mapper = self.get_protein_scores(q_alignments, q_entry, q_chains, t_entry, t_chains, q_length)
-                        q_t_scores.update(protein_scores)
-                        if protein_chain_mapper is not None:
-                            q_t_scores["protein_mapper"] = "foldseek" if "lddt" in protein_chain_mapper else "mmseqs"
-                        # Pocket and PLI score calculation
-                        t_single_pockets = [f"{t_entry}__{t_biounit}__{t_ligand_chain}" for t_ligand_chain in t_ligand_chains if f"{t_entry}__{t_biounit}__{t_ligand_chain}" in self.pocket_residues]
-                        pocket_mappings, pocket_scores, pli_mappings, pli_scores, ligand_chain_mapper = self.get_pocket_pli_scores(alns, q_single_pockets, t_single_pockets, q_pocket_length, q_pli_lengths)
-                        q_t_scores.update(pocket_scores)
-                        q_t_scores.update(pli_scores)
-                            
-                        if ligand_chain_mapper is not None:
-                            q_t_scores["ligand_mapper"] = "foldseek" if "lddt" in ligand_chain_mapper else "mmseqs"
-                        # Mapping info
-                        q_t_scores["protein_mapping"] = ",".join(f"{q_chain}:{t_chain}" for q_chain, t_chain in protein_mappings[f"{protein_chain_mapper}_weighted_sum"])
-                        q_t_scores["ligand_mapping"] = ",".join(f"{q_ligand_chain.split('__')[-1]}:{t_ligand_chain.split('__')[-1]}" for q_ligand_chain, t_ligand_chain in pocket_mappings[f"{ligand_chain_mapper}_weighted_sum"])
-                        q_t_scores["target_pocket"] = t_pocket
-                        for mapping in protein_mappings:
-                            q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_chain}:{t_chain}" for q_chain, t_chain in protein_mappings[mapping])
-                        for mapping in pocket_mappings:
-                            q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_ligand_chain.split('__')[-1]}:{t_ligand_chain.split('__')[-1]}" for q_ligand_chain, t_ligand_chain in pocket_mappings[mapping])
-                        for mapping in pli_mappings:
-                            q_t_scores[f"{mapping}_mapping"] = ",".join(f"{q_ligand_chain.split('__')[-1]}:{t_ligand_chain.split('__')[-1]}" for q_ligand_chain, t_ligand_chain in pli_mappings[mapping])
-                        q_t_scores["query_pocket"] = q_pocket
-                        yield q_t_scores
+    def write_scores(self, source_to_aln_file, score_file, midfix=None):
+        alignments = load_alignments(source_to_aln_file, self.chain_mapping, midfix=midfix)
+        columns = INFO_COLUMNS
+        suffixes = ["_weighted_sum", "_weighted_max"]
+        for suffix in suffixes:
+            for s in SCORE_NAMES:
+                columns.append(f"{s}{suffix}")
+                if not s.startswith("ligand"):
+                    columns.append(f"{s}{suffix}_source")
+                if suffix != "_weighted_sum" or s == "ligand_tanimoto_similarity":
+                    columns.append(f"{s}{suffix}_mapping")
+        columns += ["protein_mapper", "ligand_mapper"]
+        with open(score_file, "w") as f:
+            f.write("\t".join(columns) + "\n")
+            for pdb_id in tqdm(alignments):
+                if pdb_id not in self.entry_to_pockets:
+                    continue
+                for score_dict in self.get_scores(pdb_id, alignments[pdb_id], suffixes):
+                    values = [score_dict.get(x, np.nan) for x in columns]
+                    values = [f"{x:.3f}" if isinstance(x, float) else x for x in values]
+                    f.write("\t".join(str(x) for x in values) + "\n")
 
     def get_pocket_scores_pair_apo_pred(self, alns, q_single_pocket):
         pocket_scores = defaultdict(float)
@@ -410,29 +513,6 @@ class PLCScorer:
                         q_t_scores["query_pocket"] = q_pocket
                         yield q_t_scores
 
-    
-    def write_scores(self, source_to_aln_file, score_file, midfix=None):
-        alignments = load_alignments(source_to_aln_file, self.chain_mapping, midfix=midfix)
-        columns = INFO_COLUMNS
-        for suffix in ["_weighted_sum", "_weighted_max"]: #, "_max"]:
-            for source in source_to_aln_file.keys():
-                for s in SCORE_NAMES:
-                    if source == "mmseqs" and "lddt" in s:
-                        continue
-                    columns.append(f"{s}_{source}{suffix}")
-                    if suffix != "_weighted_sum":
-                        columns.append(f"{s}_{source}{suffix}_mapping")
-        columns += ["protein_mapper", "ligand_mapper"]
-        with open(score_file, "w") as f:
-            f.write("\t".join(columns) + "\n")
-            for pdb_id in tqdm(self.entry_to_pockets):
-                if pdb_id not in alignments:
-                    continue
-                for score_dict in self.get_scores(pdb_id, alignments[pdb_id]):
-                    values = [score_dict.get(x, np.nan) for x in columns]
-                    values = [f"{x:.3f}" if isinstance(x, float) else x for x in values]
-                    f.write("\t".join(str(x) for x in values) + "\n")
-
     def write_scores_apo_pred(self, source_to_aln_file, score_file, midfix=None, target_has_chain=True):
         alignments = load_alignments(source_to_aln_file, self.chain_mapping, midfix=midfix, target_has_chain=target_has_chain)
         columns = ["query_pocket", "target"]
@@ -464,13 +544,15 @@ def main():
     parser.add_argument("--df_file", type=Path, required=True)
     parser.add_argument("--cif_data_dir", type=Path, required=True)
     parser.add_argument("--score_file", type=Path, required=True)
+    parser.add_argument("--ligand_index_file", type=Path, required=True)
+    parser.add_argument("--ligand_matrix_file", type=Path, required=True)
+    parser.add_argument("--ligand_lengths_file", type=Path, required=True)
     parser.add_argument("--aln_file_foldseek", type=Path, default=None)
     parser.add_argument("--aln_file_mmseqs", type=Path, default=None)
     parser.add_argument("--midfix", type=str, default=None)
     parser.add_argument("--target_has_chain", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--apo", action="store_true")
-    
     args = parser.parse_args()
     if not args.score_file.exists() or args.overwrite:
         with open(args.score_file, "w") as f:
@@ -482,7 +564,7 @@ def main():
         if args.aln_file_mmseqs is not None:
             source_to_aln_file["mmseqs"] = args.aln_file_mmseqs
         if any(x.exists() for x in source_to_aln_file.values()):
-            plc = PLCScorer.initialise(args.df_file, args.cif_data_dir)
+            plc = PLCScorer.initialise(args.df_file, args.cif_data_dir, args.ligand_index_file, args.ligand_matrix_file, args.ligand_lengths_file)
             if args.apo:
                 plc.write_scores_apo_pred(source_to_aln_file, args.score_file, args.midfix, args.target_has_chain)
             else:
