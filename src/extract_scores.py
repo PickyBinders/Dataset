@@ -232,20 +232,21 @@ class PLCScorer:
                 q_i, t_i = int(aln[source]['qstart']), int(aln[source]['tstart'])
                 for i in range(len(aln[source]['qaln'])):
                     q_a, t_a, lddt = aln[source]['qaln'][i], aln[source]['taln'][i], aln[source]['lddtfull'][i]
-                    q_n = self.get_pocket_resnum(source, q_i, q_single_pocket, q_chain)
-                    if q_n is not None:
-                        pocket_scores[f"pocket_lddt_{source}"] += lddt
-                        if q_a == t_a:
-                            pocket_scores[f"pocket_fident_{source}"] += 1
-                        t_n = self.get_pocket_resnum(source, t_i, t_single_pocket, t_chain)
-                        if t_n is not None:
-                            pocket_scores[f"pocket_qcov_{source}"] += 1
-                            pocket_scores[f"pocket_lddt_qcov_{source}"] += lddt
+                    if q_a != "-" and t_a != "-":
+                        q_n = self.get_pocket_resnum(source, q_i, q_single_pocket, q_chain)
+                        if q_n is not None:
+                            pocket_scores[f"pocket_lddt_{source}"] += lddt
                             if q_a == t_a:
-                                pocket_scores[f"pocket_fident_qcov_{source}"] += 1
-                            for plip_suffix in PLIP_SUFFIXES:
-                                if q_n in q_plip[plip_suffix] and t_n in t_plip[plip_suffix]:
-                                    pli_scores[f"pli_qcov{plip_suffix}_{source}"] += sum((q_plip[plip_suffix][q_n] & t_plip[plip_suffix][t_n]).values())
+                                pocket_scores[f"pocket_fident_{source}"] += 1
+                            t_n = self.get_pocket_resnum(source, t_i, t_single_pocket, t_chain)
+                            if t_n is not None:
+                                pocket_scores[f"pocket_qcov_{source}"] += 1
+                                pocket_scores[f"pocket_lddt_qcov_{source}"] += lddt
+                                if q_a == t_a:
+                                    pocket_scores[f"pocket_fident_qcov_{source}"] += 1
+                                for plip_suffix in PLIP_SUFFIXES:
+                                    if q_n in q_plip[plip_suffix] and t_n in t_plip[plip_suffix]:
+                                        pli_scores[f"pli_qcov{plip_suffix}_{source}"] += sum((q_plip[plip_suffix][q_n] & t_plip[plip_suffix][t_n]).values())
                     if t_a != "-":
                         t_i += 1
                     if q_a != "-":
