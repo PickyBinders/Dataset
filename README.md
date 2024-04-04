@@ -1,20 +1,5 @@
 # Protein-Ligand Complex Prediction Dataset
 
-## Available Data
-- `data_new.tsv`: The main dataset, containing all ligand systems and their annotations (previous version in `data.tsv` and `data_clean.tsv`)
-- `column_info.csv`: A description of each column in `data_new.tsv`
-- `component_mapping_new.tsv`: The connected component IDs for each system
-- `system_files_new`: The folder containing all files related to each system in corresponding subfolders. Each system subfolder has, `system.cif`, `system.fasta`, a folder called `ligand_files` with SDF files of each ligand, `system.pdb`, and `chain_mapping.json` describing the mapping between the original chain and renamed chain in the .pdb file.
-- `scores`, `components`, `component_info.csv`: Results of similarity searches and graph clustering
-- `validation`: Results of extracting validation report information
-- `cif_data`: Results of extracting data from CIF files
-- `annotations`: Examples of SMTL annotation files with PLIP data
-- `cross_docking`: Scores linking system_IDs to each other for cross-docking
-- `apo_scores`: Scores linking apo chains to system_IDs
-- `afdb_scores`: Scores linking AFDB structures to system_IDs
-
-The Python scripts referenced below are in https://github.com/PickyBinders/Dataset
-
 ## Data Sources
 1. Protein Data Bank (PDB) MMCIF files (https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF)
 See `extract_cif_data.py`. 
@@ -26,7 +11,6 @@ See `extract_plip_data.py`.
 5. PDB seqres (https://files.wwpdb.org/pub/pdb/derived_data/pdb_seqres.txt)
 6. AlphaFold Database (https://alphafold.ebi.ac.uk/)
 7. UniRef50 (https://www.ebi.ac.uk/uniprot/download-center)
-
 
 ## Merging and annotating systems
 - All pockets and associated info from the 3 sources are merged into a single dataframe, using the entry_pdb_id, entry_biounit and ligand_chain as the key and annotated (see `create_dataset.py`). Each row of the resulting dataframe is referred to as a ligand system - identified by its (entry_pdb_id, entry_biounit, ligand_chain, ligand_interacting_protein_chains)
@@ -57,4 +41,7 @@ An Mmseqs search is run for all system chains against all UniRef50 members with 
 Janani Durairaj
 Xavier Robin
 
-This resource is developed by the Computational Structural Biology Group at the SIB Swiss Institute of Bioinformatics and the Biozentrum of the University of Basel. All copyrightable parts of this resource are available under a Creative Commons Attribution-ShareAlike 4.0 International License (see `LICENSE`)
+This resource is developed by the Computational Structural Biology Group at the SIB Swiss Institute of Bioinformatics and the Biozentrum of the University of Basel. 
+This work was supported by the LIGATE project. This project has received funding from the European High-Performance Computing Joint Undertaking (JU) under grant agreement No 956137. The JU receives support from the European Union’s Horizon 2020 research and innovation programme and Italy, Sweden, Austria, the Czech Republic, Switzerland.
+
+All copyrightable parts of this resource are available under an Apache 2.0 License (see `LICENSE`)
