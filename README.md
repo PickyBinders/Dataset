@@ -1,4 +1,6 @@
 # Protein-Ligand Complex Prediction Dataset
+This is a reference implementation of protein-ligand dataset curation, annotation and similarity calculation. 
+This effort is now continued in PLINDER (https://github.com/aivant/plinder/, to be open-sourced shortly).
 
 ## Data Sources
 1. Protein Data Bank (PDB) MMCIF files (https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF)
@@ -18,8 +20,7 @@ See `extract_plip_data.py`.
 - Subsets are created by
     - filtering out systems with only ions
     - filtering out systems with only ions and/or artifacts
-- The final dataset consists of all systems with at least one non-ion and non-artifact ligand having <10 protein chains and <10 ligand chains
-See `column_info.csv` for a description of each resulting column in the dataframe
+- The final dataset consists of all systems with at least one non-ion and non-artifact ligand having <10 protein chains and <10 ligand chains.
 
 ## System clustering
 
