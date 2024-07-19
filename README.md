@@ -1,6 +1,6 @@
 # Protein-Ligand Complex Prediction Dataset
 This is a reference implementation of protein-ligand dataset curation, annotation and similarity calculation. 
-This effort is now continued in PLINDER (https://github.com/aivant/plinder/, to be open-sourced shortly).
+This effort is now continued in PLINDER (https://github.com/plinder-org/plinder/).
 
 ## Data Sources
 1. Protein Data Bank (PDB) MMCIF files (https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF)
